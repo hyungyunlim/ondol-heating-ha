@@ -103,6 +103,11 @@ def _hours(start: datetime, end: datetime) -> float:
     return (end - start).total_seconds() / 3600
 
 
+def _short_without_heat(params: Params, now: Now, block: Block, goal: float, tolerance: float) -> bool:
+    """Whether the room would miss the block's goal if left alone; only then is a preheat due."""
+    return params.idle(now.temp, now.outdoor, _hours(now.at, block.start)) < goal - tolerance  # type: ignore[arg-type]
+
+
 def setpoint_for(target: float) -> float:
     return min(max(math.floor(target / STEP + 0.5) * STEP, MIN_SETPOINT), MAX_SETPOINT)
 
@@ -156,8 +161,7 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
                 continue
             need = params.lead(temp, goal - tolerance, now.outdoor)
             if mem.preheat_for != block.start:
-                hours = _hours(t, block.start)
-                if params.idle(temp, now.outdoor, hours) >= goal - tolerance or hours > need:
+                if not _short_without_heat(params, now, block, goal, tolerance) or _hours(t, block.start) > need:
                     continue
                 mem.preheat_for = block.start
             mem.hold = None  # the next block's preheat ends a manual hold, but never lowers it
@@ -232,7 +236,8 @@ def _next(
     if temp is not None:
         for block in preheatable:
             goal = room.presets[block.preset]
-            if goal > target and mem.preheat_for != block.start:
+            # announce only the preheats plan() will run: not for a room warm enough anyway
+            if goal > target and mem.preheat_for != block.start and _short_without_heat(params, now, block, goal, tolerance):
                 start = block.start - timedelta(hours=min(params.lead(temp, goal - tolerance, now.outdoor), 48))
                 if t < start < block.start:
                     label = PRESET_LABELS[block.preset]

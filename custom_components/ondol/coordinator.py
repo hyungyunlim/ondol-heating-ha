@@ -175,13 +175,18 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         room.last_used = datetime.fromisoformat(used) if used else None
         if hold := saved.get("hold"):
             room.memory.hold = planner.Hold(hold["target"], datetime.fromisoformat(hold["until"]), hold.get("preset"))
+        # in-flight decisions, so a restart mid-preheat or mid-night keeps them
+        mem = saved.get("memory") or {}
+        room.memory.preheat_for, room.memory.early_for = _when(mem.get("preheat_for")), _when(mem.get("early_for"))
+        room.memory.phase = mem.get("phase", "normal")
+        room.memory.phase_target, room.memory.phase_since = mem.get("phase_target"), _when(mem.get("phase_since"))
 
     def _snapshot(self) -> dict[str, Any]:
         now = dt_util.now()
         rooms = {}
         for sid, room in self.rooms.items():
             self._settle(room, now)
-            hold = room.memory.hold
+            hold, mem = room.memory.hold, room.memory
             rooms[sid] = {
                 "params": room.params.as_dict(),
                 "samples": room.samples,
@@ -190,6 +195,13 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                 "month": room.month,
                 "last_used": room.last_used.isoformat() if room.last_used else None,
                 "hold": {"target": hold.target, "until": hold.until.isoformat(), "preset": hold.preset} if hold else None,
+                "memory": {
+                    "preheat_for": _iso(mem.preheat_for),
+                    "early_for": _iso(mem.early_for),
+                    "phase": mem.phase,
+                    "phase_target": mem.phase_target,
+                    "phase_since": _iso(mem.phase_since),
+                },
             }
         return {"control": self.control, "rooms": rooms}
 
@@ -542,6 +554,14 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
 @callback
 def _climate_call(data: dict[str, Any]) -> bool:
     return data.get(ATTR_DOMAIN) == CLIMATE_DOMAIN
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _when(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
 
 
 def _number(value: Any) -> bool:

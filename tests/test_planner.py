@@ -182,3 +182,11 @@ def test_a_comfort_block_nobody_uses_drops_to_eco_after_two_hours():
     assert (empty.reason, empty.preset, empty.target) == ("empty", "eco", 22.0)
     assert plan(OFFICE, PARAMS, at_office("13:00", 0.0), Memory(), TOL).reason == "schedule"  # back
     assert plan(OFFICE, PARAMS, at_office("11:00", None), Memory(), TOL).reason == "schedule"  # no sensor
+
+
+def test_next_action_announces_only_preheats_that_will_run():
+    living = Room(presets={"comfort": 23.0, "sleep": 22.0, "eco": 22.0, "away": 21.0}, entries=parse("매일 06:30 편안, 23:00 수면"))
+    warm = plan(living, PARAMS, now("23:05", 25.8), Memory(), TOL)  # far above 편안 23 until 06:30
+    assert warm.next_text == "06:30 편안 23.0°C"
+    real = plan(ROOM, PARAMS, now("19:00", 25.4), Memory(), TOL)  # short of 수면 26 by 22:30 unless heated
+    assert real.next_text and real.next_text.endswith("예열 시작 → 22:30 수면 26.0°C")

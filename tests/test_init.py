@@ -339,3 +339,17 @@ async def test_occupancy_sensor_tracks_real_use(hass: HomeAssistant, freezer: Fr
     await _setup(hass, entry)  # the last use survives a restart
     last_used = entry.runtime_data.rooms[room.subentry_id].last_used
     assert dt_util.as_local(last_used).isoformat().startswith("2026-10-26T08:00")
+
+
+async def test_restart_keeps_a_latched_early_stop(hass, entry, freezer):
+    set_nest(hass, temperature=26.0, current=26.0)
+    await refresh_at(hass, freezer, entry, "2026-10-27 01:00:00+09:00")  # 6 h before 07:00 편안
+    room = next(iter(coordinator(entry).rooms.values()))
+    assert room.plan.reason == "early_stop"
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+    freezer.move_to("2026-10-27 01:10:00+09:00")
+    set_nest(hass, temperature=25.0, current=25.6)  # cooled a little: fresh, it wouldn't stop early yet
+    await _setup(hass, entry)
+    room = next(iter(coordinator(entry).rooms.values()))
+    assert room.plan.reason == "early_stop" and room.memory.early_for is not None
