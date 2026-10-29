@@ -63,10 +63,12 @@ def test_early_stop_when_the_stored_heat_lasts_until_the_next_block():
     mem = Memory()
     p = plan(ROOM, PARAMS, now("01:00", 26.0, day=1), mem, TOL)  # 6 h left
     assert (p.reason, p.target, p.setpoint) == ("early_stop", 25.0, 25.0)
-    # latched until 07:00 even as the room drifts down
-    assert plan(ROOM, PARAMS, now("04:00", 25.6, day=1), mem, TOL).reason == "early_stop"
-    # colder than predicted: back to the block's target
-    assert plan(ROOM, PARAMS, now("05:00", 25.4, day=1), mem, TOL).reason == "schedule"
+    assert mem.early_predicted == 25.57  # idle(26.0 °C, 8 °C outside, 6 h)
+    # latched while the room cools as predicted
+    assert plan(ROOM, PARAMS, now("04:00", 25.8, day=1), mem, TOL).reason == "early_stop"
+    # cooling faster than predicted: heat again now, the slab answers late, and no second stop
+    assert plan(ROOM, PARAMS, now("05:00", 25.55, day=1), mem, TOL).reason == "schedule"
+    assert plan(ROOM, PARAMS, now("05:30", 25.9, day=1, heating=True), mem, TOL).reason == "schedule"
     # a room that never got warm enough is not stopped early
     assert plan(ROOM, PARAMS, now("01:00", 25.2, day=1), Memory(), TOL).reason == "schedule"
 
@@ -190,3 +192,23 @@ def test_next_action_announces_only_preheats_that_will_run():
     assert warm.next_text == "06:30 편안 23.0°C"
     real = plan(ROOM, PARAMS, now("19:00", 25.4), Memory(), TOL)  # short of 수면 26 by 22:30 unless heated
     assert real.next_text and real.next_text.endswith("예열 시작 → 22:30 수면 26.0°C")
+
+
+def first_early_stop(params: Params, tolerance: float) -> datetime | None:
+    """Walk a night in the sleep block (room at 26.0 °C, 9 °C outside) to the first early stop."""
+    mem = Memory()
+    for minutes in range(0, 7 * 60, 10):
+        t = at("00:00", day=1) + timedelta(minutes=minutes)
+        if plan(ROOM, params, Now(at=t, temp=26.0, outdoor=9.0), mem, tolerance).reason == "early_stop":
+            return t
+    return None
+
+
+def test_a_corrected_cooling_rate_and_a_tighter_tolerance_stop_later():
+    old = Params(dead_time=1.5, rise=0.2, loss=0.0035, coast=0.15)
+    corrected = Params(dead_time=1.5, rise=0.2, loss=0.0071, coast=0.15)
+    before, tighter, after = first_early_stop(old, 0.5), first_early_stop(old, 0.3), first_early_stop(corrected, 0.3)
+    assert before == at("01:00", day=1)  # the 6 h cap: last night's 01:52 was this
+    assert tighter > before
+    assert after is not None and after - before >= timedelta(hours=3)
+    assert after <= at("06:00", day=1)

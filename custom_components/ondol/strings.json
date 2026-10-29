@@ -65,6 +65,8 @@
             "away": "Away",
             "follows_daycare": "Follows the daycare sensor",
             "occupancy_entity": "Occupancy sensor",
+            "tolerance": "Tolerance for this room",
+            "fine_temperature_entity": "Finer temperature sensor (learning only)",
             "schedule": "Weekly schedule"
           },
           "data_description": {
@@ -72,7 +74,9 @@
             "eco": "The house is occupied but this room isn't in use.",
             "away": "The house is certainly empty. Never below 18 °C.",
             "follows_daycare": "Comfort blocks become eco while the daycare sensor is on (a child's room).",
-            "occupancy_entity": "Someone in the room for 10 minutes turns an eco block into comfort, kept for an hour after they leave; a comfort block nobody uses for two hours drops to eco."
+            "occupancy_entity": "Someone in the room for 10 minutes turns an eco block into comfort, kept for an hour after they leave; a comfort block nobody uses for two hours drops to eco.",
+            "tolerance": "Overrides the hub's comfort tolerance, e.g. a smaller one for a child's room.",
+            "fine_temperature_entity": "A sensor that reports more often and more finely than the thermostat, such as an Awair. Only used to learn how fast the room cools at night; its offset doesn't matter."
           }
         },
         "reconfigure": {
@@ -87,6 +91,8 @@
             "away": "Away",
             "follows_daycare": "Follows the daycare sensor",
             "occupancy_entity": "Occupancy sensor",
+            "tolerance": "Tolerance for this room",
+            "fine_temperature_entity": "Finer temperature sensor (learning only)",
             "schedule": "Weekly schedule"
           },
           "data_description": {
@@ -94,7 +100,9 @@
             "eco": "The house is occupied but this room isn't in use.",
             "away": "The house is certainly empty. Never below 18 °C.",
             "follows_daycare": "Comfort blocks become eco while the daycare sensor is on (a child's room).",
-            "occupancy_entity": "Someone in the room for 10 minutes turns an eco block into comfort, kept for an hour after they leave; a comfort block nobody uses for two hours drops to eco."
+            "occupancy_entity": "Someone in the room for 10 minutes turns an eco block into comfort, kept for an hour after they leave; a comfort block nobody uses for two hours drops to eco.",
+            "tolerance": "Overrides the hub's comfort tolerance, e.g. a smaller one for a child's room.",
+            "fine_temperature_entity": "A sensor that reports more often and more finely than the thermostat, such as an Awair. Only used to learn how fast the room cools at night; its offset doesn't matter."
           }
         }
       },

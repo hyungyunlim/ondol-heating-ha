@@ -15,6 +15,8 @@ CONF_CLIMATE = "climate_entity"
 CONF_SCHEDULE = "schedule"
 CONF_FOLLOWS_DAYCARE = "follows_daycare"
 CONF_OCCUPANCY = "occupancy_entity"  # on = someone in this room
+CONF_FINE = "fine_temperature_entity"  # finer, more frequent room sensor, only for learning
+# a room may also set CONF_TOLERANCE, overriding the hub's
 
 PRESETS = ("comfort", "sleep", "eco", "away")
 PRESET_LABELS = {"comfort": "편안", "sleep": "수면", "eco": "절약", "away": "외출"}

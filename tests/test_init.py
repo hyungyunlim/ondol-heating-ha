@@ -353,3 +353,24 @@ async def test_restart_keeps_a_latched_early_stop(hass, entry, freezer):
     await _setup(hass, entry)
     room = next(iter(coordinator(entry).rooms.values()))
     assert room.plan.reason == "early_stop" and room.memory.early_for is not None
+
+
+async def test_room_tolerance_and_the_report_after_an_early_stop(hass, entry, freezer):
+    events = async_capture_events(hass, EVENT_ONDOL)
+    set_nest(hass, temperature=26.0, current=26.0)
+    await refresh_at(hass, freezer, entry, "2026-10-27 01:00:00+09:00")
+    room = next(iter(coordinator(entry).rooms.values()))
+    assert room.plan.reason == "early_stop"  # hub tolerance 0.5: 25.57 °C at 07:00 is enough
+
+    room.tolerance = 0.3  # as set in the room's options
+    room.memory.early_for = None
+    await refresh_at(hass, freezer, entry, "2026-10-27 01:05:00+09:00")
+    assert room.plan.reason == "schedule"  # 25.57 °C would miss 25.7
+
+    room.tolerance = None
+    await refresh_at(hass, freezer, entry, "2026-10-27 01:10:00+09:00")
+    with patch.object(OndolCoordinator, "async_calibrate") as calibrate:
+        set_nest(hass, temperature=26.0, current=25.8)
+        await refresh_at(hass, freezer, entry, "2026-10-27 07:01:00+09:00")
+    assert calibrate.called  # learn from the night at once
+    assert any(e.data["message"] == "조기 종료 결과: 07:00 예상 25.6°C, 실제 25.8°C" for e in events)

@@ -61,6 +61,9 @@ class Memory:
     hold: Hold | None = None
     preheat_for: datetime | None = None  # latched so a preheat doesn't flap as the room warms
     early_for: datetime | None = None
+    early_since: datetime | None = None  # when the latched early stop began
+    early_predicted: float | None = None  # room °C it expected at the block's end
+    early_cancelled: datetime | None = None  # a block whose early stop was called off: not again
     phase: str = "normal"  # normal | heatup | coast
     phase_target: float | None = None
     phase_since: datetime | None = None
@@ -120,6 +123,8 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
         mem.preheat_for = None
     if mem.early_for and t >= mem.early_for:
         mem.early_for = None
+    if mem.early_cancelled and t >= mem.early_cancelled:
+        mem.early_cancelled = None
 
     ahead = upcoming(room.entries, t, HORIZON_HOURS)
     for_block: Block | None = None
@@ -172,15 +177,26 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
             peak = temp + (params.coast if now.heating else 0.0)
             hours_left = _hours(t, nxt.start)
             at_end = params.idle(peak, now.outdoor, hours_left)
-            if mem.early_for == nxt.start and temp < target - tolerance:
-                mem.early_for = None  # colder than the model said: heat again
+            # cooling faster than the model said (judged once the coast is over): heat again now,
+            # since the slab answers late, and don't stop early again before this block
+            if mem.early_for == nxt.start and (
+                temp < target - tolerance
+                or (
+                    _hours(mem.early_since or t, t) >= params.coast_time + 0.5
+                    and params.idle(temp, now.outdoor, hours_left) < target - tolerance - 0.05
+                )
+            ):
+                mem.early_for, mem.early_cancelled = None, nxt.start
             # only worth it if the Nest would otherwise heat before the block ends
             if mem.early_for == nxt.start or (
-                hours_left <= EARLY_STOP_HOURS
+                mem.early_cancelled != nxt.start
+                and hours_left <= EARLY_STOP_HOURS
                 and temp >= target - tolerance
                 and target - tolerance <= at_end
                 and (now.heating or at_end < target)
             ):
+                if mem.early_for != nxt.start:
+                    mem.early_since, mem.early_predicted = t, round(at_end, 2)
                 mem.early_for = nxt.start
                 target, preset, reason, for_block = room.presets[nxt.preset], nxt.preset, "early_stop", nxt
 
@@ -242,7 +258,12 @@ def _next(
                 if t < start < block.start:
                     label = PRESET_LABELS[block.preset]
                     found.append((start, f"{start:%H:%M} 예열 시작 → {block.start:%H:%M} {label} {goal:.1f}°C"))
-        if reason in ("schedule", "daycare") and ahead and room.presets[ahead[0].preset] < target:
+        if (
+            reason in ("schedule", "daycare")
+            and ahead
+            and room.presets[ahead[0].preset] < target
+            and mem.early_cancelled != ahead[0].start
+        ):
             nxt = ahead[0]
             peak = temp + (params.coast if now.heating else 0.0)
             stay = params.hold(peak, target - tolerance, now.outdoor)

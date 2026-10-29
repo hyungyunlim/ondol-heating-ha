@@ -45,6 +45,7 @@ from . import model, planner, schedule
 from .const import (
     CONF_CLIMATE,
     CONF_DAYCARE,
+    CONF_FINE,
     CONF_FOLLOWS_DAYCARE,
     CONF_OCCUPANCY,
     CONF_NAME,
@@ -95,6 +96,8 @@ class RoomState:
     checked: bool = False  # compared the Nest with last_command after a restart
     last_call: tuple[datetime, str] | None = None  # someone else's climate call on this Nest: (when, origin)
     occupancy: str | None = None  # binary sensor, on = someone in the room
+    fine: str | None = None  # finer temperature sensor, for learning how fast the room cools
+    tolerance: float | None = None  # overrides the hub's
     last_used: datetime | None = None  # last time someone had been in the room for IN_USE_AFTER
     logged: tuple | None = None
 
@@ -136,6 +139,8 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                     follows_daycare=data.get(CONF_FOLLOWS_DAYCARE, False),
                 ),
                 occupancy=data.get(CONF_OCCUPANCY),
+                fine=data.get(CONF_FINE),
+                tolerance=data.get(CONF_TOLERANCE),
             )
             self._restore(room, saved.get(subentry.subentry_id, {}))
             # known from the last run, so logbook lines from the first refresh land on the entity too
@@ -180,6 +185,8 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         room.memory.preheat_for, room.memory.early_for = _when(mem.get("preheat_for")), _when(mem.get("early_for"))
         room.memory.phase = mem.get("phase", "normal")
         room.memory.phase_target, room.memory.phase_since = mem.get("phase_target"), _when(mem.get("phase_since"))
+        room.memory.early_since, room.memory.early_predicted = _when(mem.get("early_since")), mem.get("early_predicted")
+        room.memory.early_cancelled = _when(mem.get("early_cancelled"))
 
     def _snapshot(self) -> dict[str, Any]:
         now = dt_util.now()
@@ -201,6 +208,9 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                     "phase": mem.phase,
                     "phase_target": mem.phase_target,
                     "phase_since": _iso(mem.phase_since),
+                    "early_since": _iso(mem.early_since),
+                    "early_predicted": mem.early_predicted,
+                    "early_cancelled": _iso(mem.early_cancelled),
                 },
             }
         return {"control": self.control, "rooms": rooms}
@@ -380,18 +390,26 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                     self.hass,
                     start,
                     now,
-                    [room.nest for room in self.rooms.values()] + [self.outdoor_entity],
+                [room.nest for room in self.rooms.values()]
+                + [room.fine for room in self.rooms.values() if room.fine]
+                + [self.outdoor_entity],
                     significant_changes_only=False,
                 )
             )
         except Exception as err:
             LOGGER.warning("Could not read history for calibration: %s", err)
             return
-        outdoor = [(s.last_updated, float(s.state)) for s in states.get(self.outdoor_entity, []) if _number(s.state)]
+        # local times, so the learner can tell nights from days
+        def series(entity_id: str | None) -> list[tuple[datetime, float]]:
+            return [
+                (dt_util.as_local(s.last_updated), float(s.state)) for s in states.get(entity_id, []) if _number(s.state)
+            ]
+
+        outdoor = series(self.outdoor_entity)
         for room in self.rooms.values():
             rows = [
                 (
-                    s.last_updated,
+                    dt_util.as_local(s.last_updated),
                     s.attributes.get(ATTR_HVAC_ACTION) == HVACAction.HEATING,
                     s.attributes.get(ATTR_CURRENT_TEMPERATURE),
                 )
@@ -400,7 +418,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
             ]
             if not rows:
                 continue
-            found = model.extract(rows, outdoor, room.params)
+            found = model.extract(rows, outdoor, room.params, series(room.fine) if room.fine else None)
             room.samples = model.merge(room.samples, found, now)
             room.params = model.fit(room.samples, now)
             LOGGER.info("Calibrated %s from %d runs: %s", room.name, len(found), room.params)
@@ -430,6 +448,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
             if room.last_command is not None and target is not None and abs(target - room.last_command) >= 0.01:
                 self._manual(room, float(target), now, "재시작 중 수동 변경")
 
+        early = (room.memory.early_for, room.memory.early_predicted)
         room.plan = planner.plan(
             room.room,
             room.params,
@@ -443,9 +462,11 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                 used_ago=self._used_ago(room, now),
             ),
             room.memory,
-            self.tolerance,
+            room.tolerance if room.tolerance is not None else self.tolerance,
         )
         plan = room.plan
+        if early[0] and room.memory.early_for != early[0]:
+            self._early_stop_over(room, early[0], early[1], temp, now)
         if not available:
             room.status = "unavailable"
             return
@@ -470,6 +491,19 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
             )
             return
         await self._async_send(room, plan.setpoint, now, plan.text)
+
+    def _early_stop_over(
+        self, room: RoomState, until: datetime, predicted: float | None, temp: Any, now: datetime
+    ) -> None:
+        """Say how an early stop went, and learn from the night right away."""
+        actual = f"{float(temp):.1f}°C" if _number(temp) else "?"
+        if now < until:
+            message = f"조기 종료 취소: 예상보다 빨리 식음 (지금 {actual}) — 다시 난방"
+        else:
+            expected = f"{predicted:.1f}°C" if predicted is not None else "?"
+            message = f"조기 종료 결과: {until:%H:%M} 예상 {expected}, 실제 {actual}"
+        self._log(room, ("early_over", until), message)
+        self.config_entry.async_create_background_task(self.hass, self.async_calibrate(), f"{DOMAIN}_calibrate")
 
     async def _async_send(self, room: RoomState, setpoint: float, now: datetime, why: str) -> bool:
         if room.pending:

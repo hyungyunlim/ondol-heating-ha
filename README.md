@@ -14,7 +14,9 @@ slab can't reach and overshoots after it gets there. This integration:
 - **Preheats**: starts a warmer block early by the learned dead time and rise rate, and only when
   the room would not be warm enough anyway.
 - **Stops early**: before a cooler block it closes the valve as soon as the slab's stored heat will
-  carry the room to the end of the block, within a tolerance.
+  carry the room to the end of the block, within a tolerance (per room if needed: a child's room
+  can have a tighter one). If the room then cools faster than predicted, it heats again at once
+  rather than waiting until it is already too cold, and logs how each early stop turned out.
 - **Lets the slab coast**: during a long heat-up the thermostat aims 0.5 °C low, then holds the
   target once the coast has peaked.
 - **Follows presence and daycare**: away on a certain-absence sensor; a child's room uses eco
@@ -33,10 +35,15 @@ It starts in an advisory mode that only logs what it would do.
 
 ## How it learns
 
-Each night it reads the last 7 days of recorder history (the thermostat's `hvac_action` and
-`current_temperature`, plus the outdoor temperature) and turns every finished heating run into a
-sample: dead time, rise rate, coast and idle drift. Samples are kept for 90 days; recent ones
-weigh more (30-day half-life) so the model follows the season. The rise rate is fitted as a line
+Each night, and right after every early stop, it reads the last 7 days of recorder history (the
+thermostat's `hvac_action` and `current_temperature`, plus the outdoor temperature) and turns every
+finished heating run into a sample: dead time, rise rate, coast and idle drift. Samples are kept
+for 90 days; recent ones weigh more (30-day half-life) so the model follows the season.
+
+How fast a room cools comes from nights whenever there are any: early stops happen at night, and a
+still night shows the room's own heat loss, while daytime stretches carry sun and people. An
+early-stop night barely moves a Nest's 0.5 °C display, so a room can name a finer sensor (an Awair,
+say) whose slope is used instead; its offset doesn't matter. The rise rate is fitted as a line
 over the outdoor temperature, since district heating sends hotter water when it is colder outside.
 Medians keep one run warmed by people at bedtime from dragging the numbers.
 
@@ -59,8 +66,9 @@ Then **Settings → Devices & services → Add integration → Ondol Heating**:
 | Cost per room heating hour | ₩ per room-hour from a heating bill; 0 hides the cost sensors |
 
 Add each room with **Add room**: its thermostat, the four preset temperatures (on the thermostat's
-own scale, 18–30 °C), whether it follows the daycare sensor, an optional occupancy sensor, and its
-weekly schedule:
+own scale, 18–30 °C), whether it follows the daycare sensor, an optional occupancy sensor, an
+optional tolerance of its own, an optional finer temperature sensor for learning, and its weekly
+schedule:
 
 ```text
 월-금 06:30 편안, 09:30 절약, 17:00 편안, 22:30 수면

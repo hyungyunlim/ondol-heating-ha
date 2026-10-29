@@ -92,3 +92,33 @@ def test_merge_replaces_reread_runs_and_forgets_old_ones():
     kept = [{"t": "2026-09-01T10:00+00:00", "rise": 0.1}, {"t": "2026-12-30T10:00+00:00", "rise": 0.1}]
     merged = merge(kept, [{"t": "2026-12-30T10:00+00:00", "rise": 0.2}], now)
     assert merged == [{"t": "2026-12-30T10:00+00:00", "rise": 0.2}]
+
+
+def test_a_too_cold_early_stop_night_corrects_the_cooling():
+    """Like 2026-10-29→30: the Nest shows one 0.5 °C step all night, a finer sensor shows -0.12 °C/h."""
+    from zoneinfo import ZoneInfo
+
+    kst = ZoneInfo("Asia/Seoul")
+    day = datetime(2026, 10, 29, tzinfo=kst)
+    at = lambda h, m=0: day + timedelta(hours=h, minutes=m)  # noqa: E731
+    rows = [
+        (at(20, 0), False, 25.8),
+        (at(23, 48), True, 25.8),
+        (at(24, 32), False, 25.8),
+        (at(25, 52), True, 25.8),
+        (at(25, 53), False, 25.8),  # early stop
+        (at(28, 44), False, 25.5),
+        (at(30, 24), True, 25.5),  # someone raised it by hand
+        (at(31, 30), True, 25.8),
+    ]
+    stop = at(25, 53)
+    fine = [(stop + timedelta(minutes=i), round(28.5 - 0.12 * i / 60, 1)) for i in range(0, 271)]
+    outdoor = [(at(20), 9.0)]
+    found = extract(rows, outdoor, Params(), fine)
+    night = [s for s in found if s.get("night")]
+    assert len(night) == 1 and abs(night[0]["loss"] - 0.12 / (25.8 - 9.0)) < 0.001
+
+    days = [{"t": (day - timedelta(days=i)).isoformat(timespec="minutes"), "outdoor": 15.0, "loss": 0.002} for i in range(1, 6)]
+    learned = fit(days + found, at(31))
+    assert 0.0065 < learned.loss < 0.0078  # the night decides, not the five warm days
+    assert fit(days, at(31)).loss < 0.004

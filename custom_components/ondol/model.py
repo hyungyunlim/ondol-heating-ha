@@ -8,14 +8,16 @@ still lifts the room by ``coast`` °C, peaking ``coast_time`` hours later.
 District heating raises its supply temperature as it gets colder outside, so the gross rise is
 fitted as a line over the outdoor temperature (``rise`` at 10 °C plus ``rise_slope`` per °C).
 Calibration runs daily: ``extract`` turns a history window into per-run samples, which are kept
-for weeks, and ``fit`` weighs recent samples more so the model follows the season.
+for weeks, and ``fit`` weighs recent samples more so the model follows the season. The heat loss
+comes from nights when there are any: early stops run at night, and a still night shows the
+room's own loss, where a daytime stretch carries sun and people.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, fields
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import math
 
 # (time, valve open, room °C or None) per recorder row, oldest first
@@ -33,6 +35,7 @@ PRIOR_WEIGHT = 3.0  # a fresh estimate needs a few runs before it outweighs the 
 HALF_LIFE_DAYS = 30.0
 KEEP_DAYS = 90
 REFERENCE_OUTDOOR = 10.0
+NIGHT_FROM, NIGHT_UNTIL = 22, 7  # local hours: a quiet stretch centred here is a night
 
 
 @dataclass(frozen=True)
@@ -129,10 +132,22 @@ def _snapped(temp: float, snap: bool) -> float:
     return math.floor(temp * 2) / 2 + 0.25 if snap and _near_boundary(temp) else temp
 
 
+def _slope(series: Sequence[tuple[datetime, float]], start: datetime, end: datetime) -> float | None:
+    """Least-squares °C/h of a frequently reporting sensor between ``start`` and ``end``."""
+    points = [(_hours(t - start), v) for t, v in series if start <= t <= end]
+    if len(points) < 6 or points[-1][0] - points[0][0] < 1.5:
+        return None
+    mean_x = sum(x for x, _ in points) / len(points)
+    mean_y = sum(y for _, y in points) / len(points)
+    spread = sum((x - mean_x) ** 2 for x, _ in points)
+    return sum((x - mean_x) * (y - mean_y) for x, y in points) / spread if spread else None
+
+
 def extract(
     samples: Sequence[Sample],
     outdoor: Sequence[tuple[datetime, float]],
     params: Params,
+    fine: Sequence[tuple[datetime, float]] | None = None,
 ) -> list[dict]:
     """One sample per finished heating run in a history window, keyed by its start time.
 
@@ -167,7 +182,7 @@ def extract(
         quiet_after = (runs[i + 1][0] if i + 1 < len(runs) else end_of_data) - off
         temp_on = _value_at(temps, on, temps[0][1])
         out = _mean_over(outdoor, on, off, REFERENCE_OUTDOOR)
-        sample: dict = {"t": on.isoformat(timespec="minutes"), "outdoor": round(out, 1)}
+        sample: dict = {"t": on.astimezone(UTC).isoformat(timespec="minutes"), "outdoor": round(out, 1)}
 
         # rise: from the first new high after the dead time to the last one before the valve closed
         highs: list[tuple[datetime, float]] = []
@@ -219,15 +234,20 @@ def extract(
             if peak[1] > temp_off:
                 sample["coast_time"] = round(_hours(peak[0] - off), 3)
 
-        # loss: the quiet stretch after the coast has peaked
-        if _hours(quiet_after) >= 6:
-            a, b = off + timedelta(hours=3), off + quiet_after
+        # loss: the quiet stretch once the coast has passed, until the valve opens again. A night cut
+        # short by the morning block barely moves a Nest's 0.5 °C display, so a finer sensor's slope
+        # is used when there is one (its offset doesn't matter for a slope).
+        a, b = off + timedelta(hours=max(1.0, params.coast_time + 0.5)), off + quiet_after
+        if _hours(b - a) >= 2:
+            slope = _slope(fine, a, b) if fine else None
             drift = [(t, temp) for t, temp in temps if a <= t <= b]
-            if len(drift) >= 2 and _hours(drift[-1][0] - drift[0][0]) >= 3:
+            if slope is None and len(drift) >= 2 and _hours(drift[-1][0] - drift[0][0]) >= 2:
                 slope = (drift[-1][1] - drift[0][1]) / _hours(drift[-1][0] - drift[0][0])
-                gap = (drift[0][1] + drift[-1][1]) / 2 - _mean_over(outdoor, a, b, REFERENCE_OUTDOOR)
-                if gap > 3:
-                    sample["loss"] = round(max(0.0, -slope / gap), 5)
+            gap = _value_at(temps, a, temp_on) - _mean_over(outdoor, a, b, REFERENCE_OUTDOOR)
+            if slope is not None and gap > 3:
+                middle = a + (b - a) / 2
+                sample["loss"] = round(max(0.0, -slope / gap), 5)
+                sample["night"] = middle.hour >= NIGHT_FROM or middle.hour < NIGHT_UNTIL
         found.append(sample)
     return found
 
@@ -261,9 +281,13 @@ def fit(kept: Sequence[dict], now: datetime) -> Params:
         return 0.5 ** (max(age, 0.0) / HALF_LIFE_DAYS)
 
     values = Params().as_dict()
+    nights = [(s["loss"], weight(s)) for s in kept if s.get("loss") is not None and s.get("night")]
+    if nights:  # a measured night is the room's own loss: take it as it is, recent nights first
+        low, high = BOUNDS["loss"]
+        values["loss"] = min(max(_weighted_median(nights), low), high)
     for name in ("dead_time", "loss", "coast", "coast_time"):
         pairs = [(s[name], weight(s)) for s in kept if s.get(name) is not None]
-        if not pairs:
+        if not pairs or (name == "loss" and nights):
             continue
         total = sum(w for _, w in pairs)
         if name == "coast":  # mostly 0 or one 0.5 °C display step, so average instead

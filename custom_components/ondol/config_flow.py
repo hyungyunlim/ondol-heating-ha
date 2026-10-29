@@ -28,6 +28,7 @@ from . import schedule
 from .const import (
     CONF_CLIMATE,
     CONF_DAYCARE,
+    CONF_FINE,
     CONF_FOLLOWS_DAYCARE,
     CONF_NAME,
     CONF_OCCUPANCY,
@@ -73,6 +74,10 @@ ROOM_SCHEMA = vol.Schema(
         **{vol.Required(preset): _TEMPERATURE for preset in PRESETS},
         vol.Required(CONF_FOLLOWS_DAYCARE): BooleanSelector(),
         vol.Optional(CONF_OCCUPANCY): EntitySelector(EntitySelectorConfig(domain="binary_sensor")),
+        vol.Optional(CONF_TOLERANCE): NumberSelector(
+            NumberSelectorConfig(min=0.1, max=1.5, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_FINE): EntitySelector(EntitySelectorConfig(domain="sensor", device_class="temperature")),
         vol.Required(CONF_SCHEDULE): TextSelector(TextSelectorConfig(multiline=True)),
     }
 )
