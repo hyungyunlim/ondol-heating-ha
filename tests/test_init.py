@@ -8,6 +8,7 @@ from homeassistant.const import EVENT_CALL_SERVICE
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_capture_events,
@@ -286,3 +287,55 @@ async def test_logbook_describes_our_events(hass):
         "message": "Nest 26.0°C",
         "entity_id": "climate.agibang_ondol",
     }
+
+
+async def test_occupancy_sensor_tracks_real_use(hass: HomeAssistant, freezer: FrozenDateTimeFactory):
+    await hass.config.async_set_time_zone("Asia/Seoul")
+    freezer.move_to("2026-10-26 07:00:00+09:00")  # Monday, inside last night's eco block
+    office = "climate.eobmubang"
+    hass.states.async_set(office, "heat", {"temperature": 22.0, "current_temperature": 25.0, "hvac_action": "idle"})
+    hass.states.async_set("sensor.outdoor", "8.0")
+    hass.states.async_set("binary_sensor.office", "off")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        options={"outdoor_entity": "sensor.outdoor", "tolerance": 0.5, "won_per_hour": 0},
+        unique_id=DOMAIN,
+        subentries_data=[
+            {
+                "data": {
+                    **ROOM,
+                    "climate_entity": office,
+                    "name": "업무방",
+                    "follows_daycare": False,
+                    "occupancy_entity": "binary_sensor.office",
+                    "schedule": "매일 09:00 편안, 23:00 절약",
+                },
+                "subentry_type": "room",
+                "title": "업무방",
+                "unique_id": office,
+            }
+        ],
+    )
+    entry.add_to_hass(hass)
+    await _setup(hass, entry)
+    room = next(iter(entry.runtime_data.rooms.values()))
+    assert room.plan.reason == "schedule"  # never seen in use yet
+
+    hass.states.async_set("binary_sensor.office", "on")
+    await refresh_at(hass, freezer, entry, "2026-10-26 07:05:00+09:00")
+    assert room.plan.reason == "schedule"  # five minutes isn't using the room
+    await refresh_at(hass, freezer, entry, "2026-10-26 07:11:00+09:00")
+    assert (room.plan.reason, room.plan.target) == ("occupied", 25.0)
+
+    freezer.move_to("2026-10-26 08:00:00+09:00")
+    hass.states.async_set("binary_sensor.office", "off")
+    await hass.async_block_till_done()
+    await refresh_at(hass, freezer, entry, "2026-10-26 08:50:00+09:00")
+    assert room.plan.reason == "occupied"  # an hour after leaving
+    await refresh_at(hass, freezer, entry, "2026-10-26 11:01:00+09:00")
+    assert (room.plan.reason, room.plan.target) == ("empty", 22.0)  # nobody since 08:00, block from 09:00
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await _setup(hass, entry)  # the last use survives a restart
+    last_used = entry.runtime_data.rooms[room.subentry_id].last_used
+    assert dt_util.as_local(last_used).isoformat().startswith("2026-10-26T08:00")

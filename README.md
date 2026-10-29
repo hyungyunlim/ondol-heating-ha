@@ -21,6 +21,10 @@ slab can't reach and overshoots after it gets there. This integration:
   instead of comfort while a daycare sensor is on. While away nothing preheats, except a child's
   room while the child is at daycare: pickup brings someone home, so it still warms up for that
   day's next comfort block.
+- **Follows a room's occupancy** (optional sensor per room): someone in the room for 10 minutes
+  turns an eco block into comfort, kept for an hour after they leave; a comfort block nobody has
+  used for two hours drops to eco until someone comes back. For rooms used off schedule, such as a
+  home office in the evening or at weekends.
 - **Respects people**: a change made at the thermostat (or in its app, or by an automation) holds
   until the next schedule block. A preheat for that block may raise it, never lower it.
 - **Learns every room** from the thermostat's own history, every night at 04:30 and at start-up.
@@ -55,7 +59,8 @@ Then **Settings → Devices & services → Add integration → Ondol Heating**:
 | Cost per room heating hour | ₩ per room-hour from a heating bill; 0 hides the cost sensors |
 
 Add each room with **Add room**: its thermostat, the four preset temperatures (on the thermostat's
-own scale, 18–30 °C), whether it follows the daycare sensor, and its weekly schedule:
+own scale, 18–30 °C), whether it follows the daycare sensor, an optional occupancy sensor, and its
+weekly schedule:
 
 ```text
 월-금 06:30 편안, 09:30 절약, 17:00 편안, 22:30 수면

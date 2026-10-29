@@ -158,3 +158,27 @@ def test_away_without_the_child_at_daycare_stays_away():
     # a room that doesn't follow daycare stays away even while the child is there
     other = Room(presets=PICKUP.presets, entries=PICKUP.entries)
     assert plan(other, PARAMS, away(start, 5, daycare=True), Memory(), TOL).reason == "away"
+
+
+OFFICE = Room(presets=ROOM.presets, entries=parse("매일 09:00 편안, 23:00 절약"))
+
+
+def at_office(hm: str, used_ago: float | None, temp: float = 25.0) -> Now:
+    return Now(at=at(hm), temp=temp, outdoor=8.0, used_ago=used_ago)
+
+
+def test_an_eco_block_in_use_counts_as_comfort_for_an_hour():
+    p = plan(OFFICE, PARAMS, at_office("07:30", 0.0), Memory(), TOL)
+    assert (p.reason, p.preset, p.target) == ("occupied", "comfort", 25.0)
+    p = plan(OFFICE, PARAMS, at_office("07:30", 0.5), Memory(), TOL)  # left at 07:00
+    assert p.reason == "occupied" and p.next_text == "08:00 절약 22.0°C"
+    assert plan(OFFICE, PARAMS, at_office("07:30", 1.5), Memory(), TOL).reason == "schedule"
+
+
+def test_a_comfort_block_nobody_uses_drops_to_eco_after_two_hours():
+    waiting = plan(OFFICE, PARAMS, at_office("10:00", 12.0), Memory(), TOL)  # nobody since last night
+    assert waiting.reason == "schedule" and waiting.next_text == "11:00 비어 있으면 절약 22.0°C"
+    empty = plan(OFFICE, PARAMS, at_office("11:00", 13.0), Memory(), TOL)
+    assert (empty.reason, empty.preset, empty.target) == ("empty", "eco", 22.0)
+    assert plan(OFFICE, PARAMS, at_office("13:00", 0.0), Memory(), TOL).reason == "schedule"  # back
+    assert plan(OFFICE, PARAMS, at_office("11:00", None), Memory(), TOL).reason == "schedule"  # no sensor

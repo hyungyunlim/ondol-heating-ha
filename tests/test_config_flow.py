@@ -56,10 +56,13 @@ async def test_room_flow_validates_and_names_the_room(hass: HomeAssistant):
     assert result["errors"] == {"schedule": "invalid_schedule"}
     assert "HH:MM" in result["description_placeholders"]["error"]
 
-    result = await hass.config_entries.subentries.async_configure(result["flow_id"], ROOM)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {**ROOM, "occupancy_entity": "binary_sensor.babyroom_presence"}
+    )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     subentry = next(iter(entry.subentries.values()))
     assert (subentry.title, subentry.unique_id, subentry.data["name"]) == ("아기방", "climate.agibang", "아기방")
+    assert subentry.data["occupancy_entity"] == "binary_sensor.babyroom_presence"
 
     again = await hass.config_entries.subentries.async_init((entry.entry_id, "room"), context={"source": SOURCE_USER})
     again = await hass.config_entries.subentries.async_configure(again["flow_id"], ROOM)

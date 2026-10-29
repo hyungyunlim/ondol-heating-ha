@@ -30,6 +30,7 @@ from .const import (
     CONF_DAYCARE,
     CONF_FOLLOWS_DAYCARE,
     CONF_NAME,
+    CONF_OCCUPANCY,
     CONF_OUTDOOR,
     CONF_PRESENCE,
     CONF_SCHEDULE,
@@ -71,6 +72,7 @@ ROOM_SCHEMA = vol.Schema(
         vol.Optional(CONF_NAME): TextSelector(),
         **{vol.Required(preset): _TEMPERATURE for preset in PRESETS},
         vol.Required(CONF_FOLLOWS_DAYCARE): BooleanSelector(),
+        vol.Optional(CONF_OCCUPANCY): EntitySelector(EntitySelectorConfig(domain="binary_sensor")),
         vol.Required(CONF_SCHEDULE): TextSelector(TextSelectorConfig(multiline=True)),
     }
 )

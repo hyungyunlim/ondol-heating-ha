@@ -46,6 +46,7 @@ from .const import (
     CONF_CLIMATE,
     CONF_DAYCARE,
     CONF_FOLLOWS_DAYCARE,
+    CONF_OCCUPANCY,
     CONF_NAME,
     CONF_OUTDOOR,
     CONF_PRESENCE,
@@ -66,6 +67,7 @@ PER_MINUTE = 2
 PER_HOUR = 12
 CONFIRM_WITHIN = timedelta(minutes=10)  # the Nest reports a new setpoint through Pub/Sub
 MAX_FAILURES = 3
+IN_USE_AFTER = timedelta(minutes=10)  # someone walking past an occupancy sensor isn't using the room
 HISTORY_DAYS = 7
 OFF = (None, STATE_UNAVAILABLE, STATE_UNKNOWN)
 
@@ -92,6 +94,8 @@ class RoomState:
     month: list = field(default_factory=lambda: ["", 0.0])  # [YYYY-MM, hours]
     checked: bool = False  # compared the Nest with last_command after a restart
     last_call: tuple[datetime, str] | None = None  # someone else's climate call on this Nest: (when, origin)
+    occupancy: str | None = None  # binary sensor, on = someone in the room
+    last_used: datetime | None = None  # last time someone had been in the room for IN_USE_AFTER
     logged: tuple | None = None
 
 
@@ -131,6 +135,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                     entries=schedule.parse(data[CONF_SCHEDULE]),
                     follows_daycare=data.get(CONF_FOLLOWS_DAYCARE, False),
                 ),
+                occupancy=data.get(CONF_OCCUPANCY),
             )
             self._restore(room, saved.get(subentry.subentry_id, {}))
             # known from the last run, so logbook lines from the first refresh land on the entity too
@@ -149,6 +154,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
             self.hass.bus.async_listen(EVENT_CALL_SERVICE, partial(self._service_called, by_nest), _climate_call)
         )
         inputs = [e for e in (self.presence, self.daycare, self.outdoor_entity) if e]
+        inputs += [room.occupancy for room in self.rooms.values() if room.occupancy]
         entry.async_on_unload(async_track_state_change_event(self.hass, inputs, self._input_changed))
         entry.async_on_unload(async_track_time_change(self.hass, self._calibrate_daily, hour=4, minute=30, second=0))
         entry.async_create_background_task(self.hass, self.async_calibrate(), f"{DOMAIN}_calibrate")
@@ -165,6 +171,8 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         room.last_command = saved.get("last_command")
         room.today = saved.get("today", room.today)
         room.month = saved.get("month", room.month)
+        used = saved.get("last_used")  # unknown until someone has used the room: plain schedule
+        room.last_used = datetime.fromisoformat(used) if used else None
         if hold := saved.get("hold"):
             room.memory.hold = planner.Hold(hold["target"], datetime.fromisoformat(hold["until"]), hold.get("preset"))
 
@@ -180,6 +188,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                 "last_command": room.last_command,
                 "today": room.today,
                 "month": room.month,
+                "last_used": room.last_used.isoformat() if room.last_used else None,
                 "hold": {"target": hold.target, "until": hold.until.isoformat(), "preset": hold.preset} if hold else None,
             }
         return {"control": self.control, "rooms": rooms}
@@ -202,9 +211,27 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
             pass  # keep the last good reading
         return self._outdoor
 
+    def _used_ago(self, room: RoomState, now: datetime) -> float | None:
+        """Hours since the room was last in use (0 while it is), None without an occupancy sensor."""
+        if not room.occupancy:
+            return None
+        state = self.hass.states.get(room.occupancy)
+        if state is not None and state.state == STATE_ON and now - state.last_changed >= IN_USE_AFTER:
+            room.last_used = now
+        return max((now - room.last_used).total_seconds(), 0) / 3600 if room.last_used else None
+
     @callback
     def _input_changed(self, event: Event[EventStateChangedData]) -> None:
         old, new = event.data["old_state"], event.data["new_state"]
+        for room in self.rooms.values():  # a long enough stay ended: in use until it ended
+            if (
+                event.data["entity_id"] == room.occupancy
+                and old is not None
+                and old.state == STATE_ON
+                and new is not None
+                and new.last_changed - old.last_changed >= IN_USE_AFTER
+            ):
+                room.last_used = new.last_changed
         if (
             event.data["entity_id"] == self.daycare
             and new is not None
@@ -401,6 +428,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                 heating=available and nest.attributes.get(ATTR_HVAC_ACTION) == HVACAction.HEATING,  # type: ignore[union-attr]
                 away=self._is_on(self.presence),
                 daycare=self._is_on(self.daycare),
+                used_ago=self._used_ago(room, now),
             ),
             room.memory,
             self.tolerance,

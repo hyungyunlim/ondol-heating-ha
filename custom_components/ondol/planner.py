@@ -1,11 +1,15 @@
 """Per-room decision: what the room should be at now, and which setpoint the Nest gets for it.
 
-Order of precedence: away > manual hold > daycare > schedule. On top of that a warmer block
+Order of precedence: away > manual hold > daycare > occupancy > schedule. On top of that a warmer block
 ahead starts early enough for the slab to get there (preheat), and before a cooler block the
 valve closes as soon as the slab's stored heat will carry the room to the end (early stop).
 While away nothing preheats, except a room that follows daycare while the child is there: it
 still warms up for today's next comfort block, since pickup brings someone home.
 While a long heat-up is running the Nest aims 0.5 °C low, so the coast lands on the target.
+
+A room with an occupancy sensor treats an eco block as comfort while it is in use (and for an
+hour after), and drops a comfort block to eco once nobody has used it for two hours. The slab
+answers hours late either way, so this is for rooms used off schedule, not a quick fix.
 """
 
 from __future__ import annotations
@@ -23,6 +27,8 @@ HORIZON_HOURS = 18  # a warmer block further ahead than this can't need heat yet
 # extrapolations lean too hard on the learned loss. Make it per-room if winter data says so.
 EARLY_STOP_HOURS = 6
 STEP = 0.5  # Nest setpoints move in 0.5 °C steps
+IN_USE_HOURS = 1.0  # a room still counts as in use this long after people leave
+EMPTY_HOURS = 2.0  # a comfort block nobody has used for this long drops to eco
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,7 @@ class Now:
     heating: bool = False
     away: bool = False
     daycare: bool = False
+    used_ago: float | None = None  # hours since the room was last in use (0 = now); None: no sensor
 
 
 @dataclass(frozen=True)
@@ -64,7 +71,7 @@ class Plan:
     target: float  # what the room should be at
     setpoint: float  # what the Nest is told
     preset: str | None  # None during a manual hold
-    reason: str  # schedule | daycare | away | hold | preheat | early_stop
+    reason: str  # schedule | daycare | occupied | empty | away | hold | preheat | early_stop
     block: Block | None = None  # the block a preheat or early stop is for
     lead: float | None = None  # hours of heating the preheat needs
     hold_until: datetime | None = None
@@ -85,6 +92,10 @@ class Plan:
             return f"외출 {self.target:.1f}°C"
         if self.reason == "daycare":
             return f"등원 중 {label} {self.target:.1f}°C"
+        if self.reason == "occupied":
+            return f"재실 중 {label} {self.target:.1f}°C"
+        if self.reason == "empty":
+            return f"비어 있음: {label} {self.target:.1f}°C"
         return f"일정 {label} {self.target:.1f}°C"
 
 
@@ -108,6 +119,7 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
     ahead = upcoming(room.entries, t, HORIZON_HOURS)
     for_block: Block | None = None
     lead: float | None = None
+    found: list[tuple[datetime, str]] = []  # changes coming up, for the next-action text
 
     if now.away:
         mem.hold = mem.early_for = None
@@ -116,9 +128,22 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
         pickup = next((b for b in ahead if b.preset == "comfort" and b.start.date() == t.date()), None)
         preheatable = [pickup] if pickup and room.follows_daycare and now.daycare else []
     else:
-        preset, reason = block_at(room.entries, t).preset, "schedule"
+        block = block_at(room.entries, t)
+        preset, reason = block.preset, "schedule"
+        used = now.used_ago
         if room.follows_daycare and now.daycare and preset == "comfort":
             preset, reason = "eco", "daycare"
+        elif used is not None and preset == "eco" and used <= IN_USE_HOURS:
+            preset, reason = "comfort", "occupied"
+            if used > 0:
+                ends = t + timedelta(hours=IN_USE_HOURS - used)
+                found.append((ends, f"{ends:%H:%M} 절약 {room.presets['eco']:.1f}°C"))
+        elif used is not None and preset == "comfort":
+            empty_at = max(t - timedelta(hours=used), block.start) + timedelta(hours=EMPTY_HOURS)
+            if empty_at <= t:
+                preset, reason = "eco", "empty"
+            elif used > 0:
+                found.append((empty_at, f"{empty_at:%H:%M} 비어 있으면 절약 {room.presets['eco']:.1f}°C"))
         target = room.presets[preset]
         if mem.hold:
             target, preset, reason = mem.hold.target, mem.hold.preset, "hold"
@@ -171,7 +196,7 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
         mem.phase = "normal"
     setpoint = setpoint_for(target - step if mem.phase in ("heatup", "coast") else target)
 
-    next_at, next_text = _next(room, params, now, mem, tolerance, target, reason, ahead, preheatable)
+    next_at, next_text = _next(room, params, now, mem, tolerance, target, reason, ahead, preheatable, found)
     return Plan(
         target=target,
         setpoint=setpoint,
@@ -195,10 +220,10 @@ def _next(
     reason: str,
     ahead: list[Block],
     preheatable: list[Block],
+    found: list[tuple[datetime, str]],
 ) -> tuple[datetime | None, str | None]:
     """When the plan changes next, assuming the room stays where it is."""
     t, temp = now.at, now.temp
-    found: list[tuple[datetime, str]] = []
     if mem.hold:
         found.append((mem.hold.until, f"{mem.hold.until:%H:%M} 수동 유지 끝"))
     if ahead:
