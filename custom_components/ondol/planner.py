@@ -3,6 +3,8 @@
 Order of precedence: away > manual hold > daycare > schedule. On top of that a warmer block
 ahead starts early enough for the slab to get there (preheat), and before a cooler block the
 valve closes as soon as the slab's stored heat will carry the room to the end (early stop).
+While away nothing preheats, except a room that follows daycare while the child is there: it
+still warms up for today's next comfort block, since pickup brings someone home.
 While a long heat-up is running the Nest aims 0.5 °C low, so the coast lands on the target.
 """
 
@@ -108,8 +110,11 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
     lead: float | None = None
 
     if now.away:
-        mem.hold = mem.preheat_for = mem.early_for = None
+        mem.hold = mem.early_for = None
         target, preset, reason = room.presets["away"], "away", "away"
+        # pickup is a predictable arrival: a child's room still warms up for today's comfort block
+        pickup = next((b for b in ahead if b.preset == "comfort" and b.start.date() == t.date()), None)
+        preheatable = [pickup] if pickup and room.follows_daycare and now.daycare else []
     else:
         preset, reason = block_at(room.entries, t).preset, "schedule"
         if room.follows_daycare and now.daycare and preset == "comfort":
@@ -117,37 +122,38 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
         target = room.presets[preset]
         if mem.hold:
             target, preset, reason = mem.hold.target, mem.hold.preset, "hold"
+        preheatable = ahead
 
-        if temp is not None:
-            for block in ahead:
-                goal = room.presets[block.preset]
-                if goal <= target:
+    if temp is not None:
+        for block in preheatable:
+            goal = room.presets[block.preset]
+            if goal <= target:
+                continue
+            need = params.lead(temp, goal - tolerance, now.outdoor)
+            if mem.preheat_for != block.start:
+                hours = _hours(t, block.start)
+                if params.idle(temp, now.outdoor, hours) >= goal - tolerance or hours > need:
                     continue
-                need = params.lead(temp, goal - tolerance, now.outdoor)
-                if mem.preheat_for != block.start:
-                    hours = _hours(t, block.start)
-                    if params.idle(temp, now.outdoor, hours) >= goal - tolerance or hours > need:
-                        continue
-                    mem.preheat_for = block.start
-                mem.hold = None  # the next block's preheat ends a manual hold, but never lowers it
-                target, preset, reason, for_block, lead = goal, block.preset, "preheat", block, need
+                mem.preheat_for = block.start
+            mem.hold = None  # the next block's preheat ends a manual hold, but never lowers it
+            target, preset, reason, for_block, lead = goal, block.preset, "preheat", block, need
 
-            if reason in ("schedule", "daycare") and ahead and room.presets[ahead[0].preset] < target:
-                nxt = ahead[0]
-                peak = temp + (params.coast if now.heating else 0.0)
-                hours_left = _hours(t, nxt.start)
-                at_end = params.idle(peak, now.outdoor, hours_left)
-                if mem.early_for == nxt.start and temp < target - tolerance:
-                    mem.early_for = None  # colder than the model said: heat again
-                # only worth it if the Nest would otherwise heat before the block ends
-                if mem.early_for == nxt.start or (
-                    hours_left <= EARLY_STOP_HOURS
-                    and temp >= target - tolerance
-                    and target - tolerance <= at_end
-                    and (now.heating or at_end < target)
-                ):
-                    mem.early_for = nxt.start
-                    target, preset, reason, for_block = room.presets[nxt.preset], nxt.preset, "early_stop", nxt
+        if reason in ("schedule", "daycare") and ahead and room.presets[ahead[0].preset] < target:
+            nxt = ahead[0]
+            peak = temp + (params.coast if now.heating else 0.0)
+            hours_left = _hours(t, nxt.start)
+            at_end = params.idle(peak, now.outdoor, hours_left)
+            if mem.early_for == nxt.start and temp < target - tolerance:
+                mem.early_for = None  # colder than the model said: heat again
+            # only worth it if the Nest would otherwise heat before the block ends
+            if mem.early_for == nxt.start or (
+                hours_left <= EARLY_STOP_HOURS
+                and temp >= target - tolerance
+                and target - tolerance <= at_end
+                and (now.heating or at_end < target)
+            ):
+                mem.early_for = nxt.start
+                target, preset, reason, for_block = room.presets[nxt.preset], nxt.preset, "early_stop", nxt
 
     # aim one step low during a long heat-up and its coast, then hold the target itself
     step = STEP if params.coast >= STEP / 2 else 0.0
@@ -165,7 +171,7 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
         mem.phase = "normal"
     setpoint = setpoint_for(target - step if mem.phase in ("heatup", "coast") else target)
 
-    next_at, next_text = _next(room, params, now, mem, tolerance, target, reason, ahead)
+    next_at, next_text = _next(room, params, now, mem, tolerance, target, reason, ahead, preheatable)
     return Plan(
         target=target,
         setpoint=setpoint,
@@ -188,6 +194,7 @@ def _next(
     target: float,
     reason: str,
     ahead: list[Block],
+    preheatable: list[Block],
 ) -> tuple[datetime | None, str | None]:
     """When the plan changes next, assuming the room stays where it is."""
     t, temp = now.at, now.temp
@@ -197,8 +204,8 @@ def _next(
     if ahead:
         nxt = ahead[0]
         found.append((nxt.start, f"{nxt.start:%H:%M} {PRESET_LABELS[nxt.preset]} {room.presets[nxt.preset]:.1f}°C"))
-    if temp is not None and not now.away:
-        for block in ahead:
+    if temp is not None:
+        for block in preheatable:
             goal = room.presets[block.preset]
             if goal > target and mem.preheat_for != block.start:
                 start = block.start - timedelta(hours=min(params.lead(temp, goal - tolerance, now.outdoor), 48))

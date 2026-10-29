@@ -18,7 +18,9 @@ slab can't reach and overshoots after it gets there. This integration:
 - **Lets the slab coast**: during a long heat-up the thermostat aims 0.5 °C low, then holds the
   target once the coast has peaked.
 - **Follows presence and daycare**: away on a certain-absence sensor; a child's room uses eco
-  instead of comfort while a daycare sensor is on.
+  instead of comfort while a daycare sensor is on. While away nothing preheats, except a child's
+  room while the child is at daycare: pickup brings someone home, so it still warms up for that
+  day's next comfort block.
 - **Respects people**: a change made at the thermostat (or in its app, or by an automation) holds
   until the next schedule block. A preheat for that block may raise it, never lower it.
 - **Learns every room** from the thermostat's own history, every night at 04:30 and at start-up.

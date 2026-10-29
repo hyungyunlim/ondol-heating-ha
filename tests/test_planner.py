@@ -127,3 +127,34 @@ def test_setpoints_stay_in_range():
     assert setpoint_for(35.0) == 30.0
     p = plan(ROOM, PARAMS, now("12:00", None), Memory(), TOL)  # no room temperature: plain schedule
     assert (p.reason, p.setpoint) == ("schedule", 25.0)
+
+
+PICKUP = Room(
+    presets=ROOM.presets,
+    entries=parse("매일 07:30 편안, 22:30 수면\n월-금 17:00 편안"),
+    follows_daycare=True,
+)
+
+
+def away(start: datetime, minutes: int, daycare: bool) -> Now:
+    return Now(at=start + timedelta(minutes=minutes), temp=24.0, outdoor=8.0, away=True, daycare=daycare)
+
+
+def test_away_with_the_child_at_daycare_still_preheats_for_pickup():
+    start = at("17:00") - timedelta(hours=PARAMS.lead(24.0, 25.0 - TOL, 8.0))  # Monday
+    mem = Memory()
+    before = plan(PICKUP, PARAMS, away(start, -10, daycare=True), mem, TOL)
+    assert (before.reason, before.target) == ("away", 20.0)
+    assert before.next_text == f"{start:%H:%M} 예열 시작 → 17:00 편안 25.0°C"
+    during = plan(PICKUP, PARAMS, away(start, 5, daycare=True), mem, TOL)
+    assert (during.reason, during.preset, during.target) == ("preheat", "comfort", 25.0)
+
+
+def test_away_without_the_child_at_daycare_stays_away():
+    start = at("17:00") - timedelta(hours=PARAMS.lead(24.0, 25.0 - TOL, 8.0))
+    p = plan(PICKUP, PARAMS, away(start, 5, daycare=False), Memory(), TOL)
+    assert (p.reason, p.target) == ("away", 20.0)
+    assert "예열" not in (p.next_text or "")
+    # a room that doesn't follow daycare stays away even while the child is there
+    other = Room(presets=PICKUP.presets, entries=PICKUP.entries)
+    assert plan(other, PARAMS, away(start, 5, daycare=True), Memory(), TOL).reason == "away"
