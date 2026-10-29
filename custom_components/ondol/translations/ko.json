@@ -1,0 +1,156 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "온돌 난방",
+        "description": "모든 방이 함께 쓰는 입력입니다. 방은 설정을 마친 뒤 **방 추가**로 넣습니다.",
+        "data": {
+          "presence_entity": "집이 확실히 빔",
+          "daycare_entity": "아이 외출 (어린이집)",
+          "outdoor_entity": "외기 온도",
+          "tolerance": "허용 편차",
+          "won_per_hour": "방 난방 1시간당 비용"
+        },
+        "data_description": {
+          "presence_entity": "집이 확실히 비었을 때만 켜지는 센서. 켜지면 모든 방이 외출 온도로 내려갑니다.",
+          "daycare_entity": "아이가 나가 있을 때 켜지는 센서. 이 센서를 따르는 방은 편안 대신 절약을 씁니다.",
+          "outdoor_entity": "열손실과 슬래브가 방을 데우는 속도 계산에 씁니다.",
+          "tolerance": "블록이 시작하거나 끝날 때 목표보다 이만큼 낮아도 됩니다. 클수록 더 아낍니다.",
+          "won_per_hour": "난방비 고지서로 계산: 금액 ÷ 그 기간 방별 난방 시간 합. 0이면 비용 센서를 숨깁니다."
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "온돌 난방은 이미 설정되어 있습니다."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "온돌 난방",
+        "description": "모든 방이 함께 쓰는 입력입니다. 방은 설정을 마친 뒤 **방 추가**로 넣습니다.",
+        "data": {
+          "presence_entity": "집이 확실히 빔",
+          "daycare_entity": "아이 외출 (어린이집)",
+          "outdoor_entity": "외기 온도",
+          "tolerance": "허용 편차",
+          "won_per_hour": "방 난방 1시간당 비용"
+        },
+        "data_description": {
+          "presence_entity": "집이 확실히 비었을 때만 켜지는 센서. 켜지면 모든 방이 외출 온도로 내려갑니다.",
+          "daycare_entity": "아이가 나가 있을 때 켜지는 센서. 이 센서를 따르는 방은 편안 대신 절약을 씁니다.",
+          "outdoor_entity": "열손실과 슬래브가 방을 데우는 속도 계산에 씁니다.",
+          "tolerance": "블록이 시작하거나 끝날 때 목표보다 이만큼 낮아도 됩니다. 클수록 더 아낍니다.",
+          "won_per_hour": "난방비 고지서로 계산: 금액 ÷ 그 기간 방별 난방 시간 합. 0이면 비용 센서를 숨깁니다."
+        }
+      }
+    }
+  },
+  "config_subentries": {
+    "room": {
+      "entry_type": "방",
+      "initiate_flow": {
+        "user": "방 추가"
+      },
+      "step": {
+        "user": {
+          "title": "방 추가",
+          "description": "온도는 온도조절기 기준입니다. 일정은 한 줄에 요일 묶음 하나: `월-금 06:30 편안, 09:30 절약, 17:00 편안, 22:30 수면`. 요일은 월~일, 범위(월-금), 목록(토,일), 매일. 프리셋은 편안·수면·절약·외출. 블록은 다음 항목까지 이어지고, 줄이 없는 요일은 전날 마지막 블록이 이어집니다.",
+          "data": {
+            "climate_entity": "온도조절기",
+            "name": "이름",
+            "comfort": "편안",
+            "sleep": "수면",
+            "eco": "절약",
+            "away": "외출",
+            "follows_daycare": "어린이집 센서 따름",
+            "schedule": "주간 일정"
+          },
+          "data_description": {
+            "name": "비우면 온도조절기 이름을 씁니다.",
+            "eco": "집에 사람은 있지만 이 방은 안 쓸 때.",
+            "away": "집이 확실히 비었을 때. 18 °C 아래로는 내리지 않습니다.",
+            "follows_daycare": "어린이집 센서가 켜진 동안 편안 블록을 절약으로 바꿉니다 (아이 방)."
+          }
+        },
+        "reconfigure": {
+          "title": "방 수정",
+          "description": "온도는 온도조절기 기준입니다. 일정은 한 줄에 요일 묶음 하나: `월-금 06:30 편안, 09:30 절약, 17:00 편안, 22:30 수면`. 요일은 월~일, 범위(월-금), 목록(토,일), 매일. 프리셋은 편안·수면·절약·외출. 블록은 다음 항목까지 이어지고, 줄이 없는 요일은 전날 마지막 블록이 이어집니다.",
+          "data": {
+            "climate_entity": "온도조절기",
+            "name": "이름",
+            "comfort": "편안",
+            "sleep": "수면",
+            "eco": "절약",
+            "away": "외출",
+            "follows_daycare": "어린이집 센서 따름",
+            "schedule": "주간 일정"
+          },
+          "data_description": {
+            "name": "비우면 온도조절기 이름을 씁니다.",
+            "eco": "집에 사람은 있지만 이 방은 안 쓸 때.",
+            "away": "집이 확실히 비었을 때. 18 °C 아래로는 내리지 않습니다.",
+            "follows_daycare": "어린이집 센서가 켜진 동안 편안 블록을 절약으로 바꿉니다 (아이 방)."
+          }
+        }
+      },
+      "error": {
+        "invalid_schedule": "일정을 읽을 수 없습니다: {error}",
+        "already_configured": "이 온도조절기는 이미 다른 방에 있습니다."
+      },
+      "abort": {
+        "reconfigure_successful": "방을 수정했습니다."
+      }
+    }
+  },
+  "entity": {
+    "climate": {
+      "room": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "comfort": "편안",
+              "sleep": "수면",
+              "eco": "절약",
+              "away": "외출"
+            }
+          }
+        }
+      }
+    },
+    "sensor": {
+      "next_action": {
+        "name": "다음 동작"
+      },
+      "heating_today": {
+        "name": "오늘 난방"
+      },
+      "planned_heating": {
+        "name": "계획 난방"
+      },
+      "dead_time": {
+        "name": "가동 지연"
+      },
+      "rise_rate": {
+        "name": "승온 속도"
+      },
+      "coast": {
+        "name": "여열 상승"
+      },
+      "idle_drift": {
+        "name": "무가동 하강"
+      },
+      "cost_today": {
+        "name": "오늘 난방비"
+      },
+      "cost_month": {
+        "name": "이번 달 난방비"
+      }
+    },
+    "switch": {
+      "control": {
+        "name": "난방 제어"
+      }
+    }
+  }
+}

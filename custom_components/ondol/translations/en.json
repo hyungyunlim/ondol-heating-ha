@@ -1,0 +1,156 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Ondol heating",
+        "description": "Inputs shared by every room. Add the rooms afterwards with **Add room**.",
+        "data": {
+          "presence_entity": "Nobody home (certain)",
+          "daycare_entity": "Child out (daycare)",
+          "outdoor_entity": "Outdoor temperature",
+          "tolerance": "Comfort tolerance",
+          "won_per_hour": "Cost per room heating hour"
+        },
+        "data_description": {
+          "presence_entity": "On only while the house is certainly empty; every room drops to its away temperature.",
+          "daycare_entity": "On while the child is out; rooms that follow it use eco instead of comfort.",
+          "outdoor_entity": "Used for heat loss and for how fast the slab warms a room.",
+          "tolerance": "How far below its target a room may be when a block starts or ends. Larger saves more.",
+          "won_per_hour": "From a heating bill: won divided by the room heating hours of that billing period. 0 hides the cost sensors."
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Ondol heating is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Ondol heating",
+        "description": "Inputs shared by every room. Add the rooms afterwards with **Add room**.",
+        "data": {
+          "presence_entity": "Nobody home (certain)",
+          "daycare_entity": "Child out (daycare)",
+          "outdoor_entity": "Outdoor temperature",
+          "tolerance": "Comfort tolerance",
+          "won_per_hour": "Cost per room heating hour"
+        },
+        "data_description": {
+          "presence_entity": "On only while the house is certainly empty; every room drops to its away temperature.",
+          "daycare_entity": "On while the child is out; rooms that follow it use eco instead of comfort.",
+          "outdoor_entity": "Used for heat loss and for how fast the slab warms a room.",
+          "tolerance": "How far below its target a room may be when a block starts or ends. Larger saves more.",
+          "won_per_hour": "From a heating bill: won divided by the room heating hours of that billing period. 0 hides the cost sensors."
+        }
+      }
+    }
+  },
+  "config_subentries": {
+    "room": {
+      "entry_type": "Room",
+      "initiate_flow": {
+        "user": "Add room"
+      },
+      "step": {
+        "user": {
+          "title": "Add room",
+          "description": "Temperatures are on the thermostat's own scale. Schedule: one line per group of days, e.g. `mon-fri 06:30 comfort, 09:30 eco, 17:00 comfort, 22:30 sleep`. Days: mon…sun, ranges (mon-fri), lists (sat,sun) or daily (Korean 월…일 and 매일 work too). Presets: comfort, sleep, eco, away (편안, 수면, 절약, 외출). A block lasts until the next entry; a day without a line keeps the previous block.",
+          "data": {
+            "climate_entity": "Thermostat",
+            "name": "Name",
+            "comfort": "Comfort",
+            "sleep": "Sleep",
+            "eco": "Eco",
+            "away": "Away",
+            "follows_daycare": "Follows the daycare sensor",
+            "schedule": "Weekly schedule"
+          },
+          "data_description": {
+            "name": "Defaults to the thermostat's name.",
+            "eco": "The house is occupied but this room isn't in use.",
+            "away": "The house is certainly empty. Never below 18 °C.",
+            "follows_daycare": "Comfort blocks become eco while the daycare sensor is on (a child's room)."
+          }
+        },
+        "reconfigure": {
+          "title": "Edit room",
+          "description": "Temperatures are on the thermostat's own scale. Schedule: one line per group of days, e.g. `mon-fri 06:30 comfort, 09:30 eco, 17:00 comfort, 22:30 sleep`. Days: mon…sun, ranges (mon-fri), lists (sat,sun) or daily (Korean 월…일 and 매일 work too). Presets: comfort, sleep, eco, away (편안, 수면, 절약, 외출). A block lasts until the next entry; a day without a line keeps the previous block.",
+          "data": {
+            "climate_entity": "Thermostat",
+            "name": "Name",
+            "comfort": "Comfort",
+            "sleep": "Sleep",
+            "eco": "Eco",
+            "away": "Away",
+            "follows_daycare": "Follows the daycare sensor",
+            "schedule": "Weekly schedule"
+          },
+          "data_description": {
+            "name": "Defaults to the thermostat's name.",
+            "eco": "The house is occupied but this room isn't in use.",
+            "away": "The house is certainly empty. Never below 18 °C.",
+            "follows_daycare": "Comfort blocks become eco while the daycare sensor is on (a child's room)."
+          }
+        }
+      },
+      "error": {
+        "invalid_schedule": "Can't read the schedule: {error}",
+        "already_configured": "This thermostat already belongs to a room."
+      },
+      "abort": {
+        "reconfigure_successful": "Room updated."
+      }
+    }
+  },
+  "entity": {
+    "climate": {
+      "room": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "comfort": "Comfort",
+              "sleep": "Sleep",
+              "eco": "Eco",
+              "away": "Away"
+            }
+          }
+        }
+      }
+    },
+    "sensor": {
+      "next_action": {
+        "name": "Next action"
+      },
+      "heating_today": {
+        "name": "Heating today"
+      },
+      "planned_heating": {
+        "name": "Planned heating"
+      },
+      "dead_time": {
+        "name": "Dead time"
+      },
+      "rise_rate": {
+        "name": "Rise rate"
+      },
+      "coast": {
+        "name": "Coast"
+      },
+      "idle_drift": {
+        "name": "Idle drift"
+      },
+      "cost_today": {
+        "name": "Cost today"
+      },
+      "cost_month": {
+        "name": "Cost this month"
+      }
+    },
+    "switch": {
+      "control": {
+        "name": "Control"
+      }
+    }
+  }
+}
