@@ -100,12 +100,8 @@ class PlannedHeatingSensor(RoomEntity, SensorEntity):
 
     @property
     def native_value(self) -> int | None:
-        nest = self.hass.states.get(self.room.nest)
-        temp = nest.attributes.get(ATTR_CURRENT_TEMPERATURE) if nest else None
-        plan = self.room.plan
-        if temp is None or plan is None:
-            return None
-        return 100 if float(temp) < plan.setpoint else 0
+        wants = self.coordinator.wants_heat(self.room)
+        return None if wants is None else 100 * wants
 
 
 class RoomModelSensor(RoomEntity, SensorEntity):

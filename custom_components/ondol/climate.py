@@ -84,6 +84,11 @@ class OndolClimate(RoomEntity, ClimateEntity):
 
     @property
     def hvac_action(self) -> HVACAction | None:
+        if not self.coordinator.control and self.hvac_mode == HVACMode.HEAT:
+            # advisory: show what the plan would have the valve do, so its history can be charted
+            # next to the real thermostat's
+            wants = self.coordinator.wants_heat(self.room)
+            return None if wants is None else (HVACAction.HEATING if wants else HVACAction.IDLE)
         action = self._nest(ATTR_HVAC_ACTION)
         return HVACAction(action) if action in HVACAction._value2member_map_ else None
 

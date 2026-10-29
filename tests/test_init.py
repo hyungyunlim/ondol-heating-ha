@@ -130,6 +130,7 @@ async def test_advisory_logs_but_sends_nothing(hass, entry, calls, freezer):
     assert (climate.attributes["nest_setpoint"], climate.attributes["status"]) == (25.5, "advisory")
     assert len(events) == 1 and "제안" in events[0].data["message"] and "25.5" in events[0].data["message"]
     assert hass.states.get(entity(hass, entry, "sensor", "planned_heating")).state == "100"
+    assert climate.attributes["hvac_action"] == "heating"  # the plan's valve, while advising
     assert events[0].data["entity_id"] == climate.entity_id
 
     await refresh_at(hass, freezer, entry, "2026-10-26 17:05:00+09:00")
@@ -144,6 +145,10 @@ async def test_control_sends_and_the_nest_confirms(hass, entry, calls, freezer):
     await hass.async_block_till_done()
     room = next(iter(coordinator(entry).rooms.values()))
     assert (room.last_command, room.pending, room.status) == (25.5, None, "ok")
+    set_nest(hass, temperature=25.5, action="heating")
+    await hass.async_block_till_done()
+    await refresh_at(hass, freezer, entry, "2026-10-26 17:01:00+09:00")
+    assert hass.states.get(entity(hass, entry, "climate", "room")).attributes["hvac_action"] == "heating"
     await refresh_at(hass, freezer, entry, "2026-10-26 17:10:00+09:00")
     assert len(calls) == 1
 

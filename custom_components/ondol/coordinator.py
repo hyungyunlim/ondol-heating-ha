@@ -302,6 +302,14 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         if room.month[0] == local.strftime("%Y-%m"):
             room.month[1] += hours
 
+    def wants_heat(self, room: RoomState) -> bool | None:
+        """Whether the plan's setpoint is above the room, i.e. the Nest would heat for it."""
+        nest = self.hass.states.get(room.nest)
+        temp = nest.attributes.get(ATTR_CURRENT_TEMPERATURE) if nest is not None else None
+        if room.plan is None or not _number(temp):
+            return None
+        return float(temp) < room.plan.setpoint
+
     def hours_today(self, room: RoomState) -> float:
         self._settle(room, dt_util.now())
         return room.today[1]

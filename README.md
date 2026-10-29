@@ -71,7 +71,7 @@ Per room (`<room> 온돌` device):
 
 | Entity | |
 |---|---|
-| `climate.<room>_ondol` | the room as planned: target, preset, the Nest setpoint it sends, the plan in words. Setting a temperature or preset here goes to the thermostat at once and holds until the next block. |
+| `climate.<room>_ondol` | the room as planned: target, preset, the Nest setpoint it sends, the plan in words. While advisory its `hvac_action` is the plan's valve (heating when the plan's setpoint is above the room), so its history charts next to the thermostat's; with control on it is the thermostat's own. Setting a temperature or preset here goes to the thermostat at once and holds until the next block. |
 | `sensor.<room>_ondol_next_action` | e.g. `20:58 예열 시작 → 22:30 수면 26.0°C` |
 | `sensor.<room>_ondol_heating_today` | hours the valve was open today |
 | `sensor.<room>_ondol_planned_heating` | 100 while the plan would have the valve open (judged on the real room), so advisory plans can be charted next to actual heating |
