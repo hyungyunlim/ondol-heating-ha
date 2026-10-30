@@ -33,6 +33,9 @@ BOUNDS = {
     "coast_time": (0.25, 3.0),
 }
 PRIOR_WEIGHT = 3.0  # a fresh estimate needs a few runs before it outweighs the defaults
+# measured 2026-10: a heating room rose 0.13 °C/h net at ~17 °C above outdoor; the gross rise prior
+# follows whatever loss is learned, so the net stays put when the loss changes
+PRIOR_NET_RISE, PRIOR_GAP = 0.13, 17.0
 HALF_LIFE_DAYS = 30.0
 KEEP_DAYS = 90
 REFERENCE_OUTDOOR = 10.0
@@ -275,7 +278,8 @@ def extract(
         ):
             net = (highs[-1][1] - highs[0][1]) / _hours(highs[-1][0] - highs[0][0])
             mid = (highs[-1][1] + highs[0][1]) / 2
-            sample["rise"] = round(net + params.loss * (mid - out), 4)
+            # the observed net rise and where it was measured; fit() adds the loss it learns
+            sample["slope"], sample["gap"] = round(net, 4), round(mid - out, 1)
 
         # dead time: a long run from rest (short ones are the Nest topping up a warm slab). A Nest
         # flipping between 25.2 and 25.3 sits at 25.25; it has risen once it reports the next flip.
@@ -380,7 +384,13 @@ def fit(kept: Sequence[dict], now: datetime) -> Params:
         estimate = min(max(estimate, low), high)
         values[name] = estimate + PRIOR_WEIGHT / (total + PRIOR_WEIGHT) * (values[name] - estimate)
 
-    rises = [(s["outdoor"], s["rise"], weight(s)) for s in kept if s.get("rise") is not None]
+    loss = values["loss"]
+    rises = [
+        (s["outdoor"], s["slope"] + loss * s["gap"] if "slope" in s else s["rise"], weight(s))
+        for s in kept
+        if s.get("slope") is not None or s.get("rise") is not None  # "rise": stored before 0.1.7
+    ]
+    values["rise"] = PRIOR_NET_RISE + loss * PRIOR_GAP
     if rises:
         total = sum(w for *_, w in rises)
         mean_out = sum(o * w for o, _, w in rises) / total

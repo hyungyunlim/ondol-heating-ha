@@ -31,7 +31,7 @@ def test_learns_plausible_numbers_from_a_real_week():
     samples = extract(climate, outdoor, Params())
     params = fit(samples, climate[-1][0])
     # its longest run went 25.75 -> 26.25 °C in 3.8 h at 8 °C outside
-    assert any(abs(s.get("rise", 0) - 0.2) < 0.03 for s in samples)
+    assert any(abs(s.get("slope", 0) - 0.13) < 0.02 for s in samples)
     assert 0.8 <= params.dead_time <= 1.75
     assert 0.15 <= params.rise <= 0.25
     assert 0.002 <= params.loss <= 0.007
@@ -161,3 +161,14 @@ def test_an_aired_night_is_not_learned_but_a_normal_one_is():
     assert any(s.get("night") for s in extract(rows, outdoor, Params(), fine))
     aired = [(at(27), at(27, 20))]  # a window opened at 03:00 for 20 minutes
     assert not any(s.get("loss") is not None for s in extract(rows, outdoor, Params(), fine, aired))
+
+
+def test_a_bigger_loss_keeps_the_observed_heating_rate():
+    """The net rise a run showed stays the net rise when the learned loss doubles (0.1.5 → 0.1.7 bug)."""
+    now = datetime(2026, 10, 30, tzinfo=UTC)
+    run = {"t": "2026-10-28T12:00+00:00", "outdoor": 8.3, "slope": 0.131, "gap": 17.7}
+    night = lambda loss: {"t": "2026-10-29T16:52+00:00", "outdoor": 9.0, "loss": loss, "night": True}  # noqa: E731
+    slow, fast = fit([run, night(0.0035)], now), fit([run, night(0.0071)], now)
+    assert fast.loss == 0.0071
+    assert abs(slow.net_rise(25.4, 10.0) - fast.net_rise(25.4, 10.0)) < 0.01
+    assert fast.net_rise(25.4, 10.0) > 0.14

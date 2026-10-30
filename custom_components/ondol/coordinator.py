@@ -329,7 +329,9 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         old, new = event.data["old_state"], event.data["new_state"]
         now = dt_util.now()
         self._track_heating(room, new, now)
-        if old is None or new is None or old.state in OFF or new.state != HVACMode.HEAT:
+        # a setpoint someone chose only counts between two heating states: turning a Nest back on
+        # brings back its old setpoint, which nobody just picked
+        if old is None or new is None or old.state != HVACMode.HEAT or new.state != HVACMode.HEAT:
             self.config_entry.async_create_task(self.hass, self.async_request_refresh())
             return
         before, after = old.attributes.get(ATTR_TEMPERATURE), new.attributes.get(ATTR_TEMPERATURE)

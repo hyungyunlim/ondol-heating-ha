@@ -445,3 +445,12 @@ async def test_a_window_opened_by_hand_is_spotted_from_the_air(hass, freezer):
     assert room.plan.reason == "airing"
     await refresh_at(hass, freezer, entry, "2026-10-26 13:00:00+09:00")
     assert room.plan.reason != "airing"  # it stopped falling: the plan resumes
+
+
+async def test_turning_a_nest_back_on_is_not_a_manual_change(hass, entry, freezer):
+    set_nest(hass, temperature=None, mode="off")
+    await hass.async_block_till_done()
+    set_nest(hass, temperature=26.0)  # back on: the Nest brings back its old setpoint
+    await hass.async_block_till_done()
+    room = next(iter(coordinator(entry).rooms.values()))
+    assert room.memory.hold is None

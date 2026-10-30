@@ -167,12 +167,16 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
             target, preset, reason = mem.hold.target, mem.hold.preset, "hold"
         preheatable = ahead
 
+    if mem.preheat_for and (now.airing_since or now.aired_recently):
+        mem.preheat_for = None  # latched on air an open window cooled, not on a cold room
     if temp is not None:
         for block in preheatable:
             goal = room.presets[block.preset]
             if goal <= target:
                 continue
             need = params.lead(temp, goal - tolerance, now.outdoor)
+            if mem.preheat_for == block.start and _hours(t, block.start) > 1.5 * need:
+                mem.preheat_for = None  # the room needs far less than when it latched: decide again
             if mem.preheat_for != block.start:
                 if (
                     not _short_without_heat(params, now, block, goal, tolerance)

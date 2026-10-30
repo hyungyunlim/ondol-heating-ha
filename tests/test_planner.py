@@ -43,9 +43,12 @@ def test_preheat_starts_lead_hours_ahead_and_latches():
     assert during.setpoint == 25.5  # a long heat-up aims one step low and lets the slab coast up
     assert "예열" in during.text
 
-    # warmer than the model expected: still preheating, no flapping back to the schedule
-    later = plan(ROOM, PARAMS, Now(at=start + timedelta(hours=2), temp=25.6, outdoor=8.0), mem, TOL)
+    # a little warmer than the model expected: still preheating, no flapping back to the schedule
+    later = plan(ROOM, PARAMS, Now(at=start + timedelta(hours=2), temp=25.3, outdoor=8.0), mem, TOL)
     assert later.reason == "preheat"
+    # far warmer, needing a fraction of the hours left: paused and planned again nearer the block
+    jumped = plan(ROOM, PARAMS, Now(at=start + timedelta(hours=2), temp=25.6, outdoor=8.0), Memory(preheat_for=at("22:30")), TOL)
+    assert jumped.reason == "schedule" and jumped.next_text and "예열 시작" in jumped.next_text
     # the block itself takes over at 22:30
     assert plan(ROOM, PARAMS, now("22:31", 25.8), mem, TOL).reason == "schedule"
 
@@ -223,3 +226,17 @@ def test_airing_during_an_early_stop_neither_heats_nor_calls_it_off():
     settling = plan(ROOM, PARAMS, now("03:30", 25.4, day=1, aired_recently=True), mem, TOL)
     assert settling.reason == "early_stop"  # the cold air is the window's, not the model's error
     assert plan(ROOM, PARAMS, now("04:30", 25.8, day=1), mem, TOL).reason == "early_stop"
+
+
+
+def test_a_preheat_latched_on_aired_air_is_dropped():
+    """2026-10-30: airing cooled 아기방 to 24.4 °C at 10:50 and latched an 11.7 h preheat for 22:30."""
+    params = Params(dead_time=1.5, rise=0.26, loss=0.0071, coast=0.15)
+    mem = Memory(preheat_for=at("22:30"))  # as restored from storage after a restart
+    aired = plan(ROOM, params, now("11:00", 24.4, airing_since=at("10:38")), mem, TOL)
+    assert aired.reason == "airing" and mem.preheat_for is None
+    recovered = plan(ROOM, params, now("12:00", 25.4), mem, TOL)  # windows shut, air back from the warm slab
+    assert recovered.reason == "schedule" and mem.preheat_for is None
+    lead = params.lead(25.4, 26.0 - TOL, 8.0)
+    assert 2 < lead < 5  # a few hours from the real room temperature, not 11.7
+    assert recovered.next_text == f"{at('22:30') - timedelta(hours=lead):%H:%M} 예열 시작 → 22:30 수면 26.0°C"
