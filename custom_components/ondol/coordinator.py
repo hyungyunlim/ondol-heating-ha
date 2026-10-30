@@ -44,6 +44,7 @@ from homeassistant.util import dt as dt_util
 from . import model, planner, schedule
 from .const import (
     CONF_CLIMATE,
+    CONF_CO2,
     CONF_DAYCARE,
     CONF_FINE,
     CONF_FOLLOWS_DAYCARE,
@@ -53,6 +54,7 @@ from .const import (
     CONF_PRESENCE,
     CONF_SCHEDULE,
     CONF_TOLERANCE,
+    CONF_WINDOWS,
     CONF_WON_PER_HOUR,
     DEFAULT_TOLERANCE,
     DOMAIN,
@@ -71,6 +73,7 @@ MAX_FAILURES = 3
 IN_USE_AFTER = timedelta(minutes=10)  # someone walking past an occupancy sensor isn't using the room
 HISTORY_DAYS = 7
 OFF = (None, STATE_UNAVAILABLE, STATE_UNKNOWN)
+WINDOW_OPEN = ("open", "opening", "closing", STATE_ON)  # a pusher on its way is still open
 
 
 @dataclass
@@ -97,6 +100,10 @@ class RoomState:
     last_call: tuple[datetime, str] | None = None  # someone else's climate call on this Nest: (when, origin)
     occupancy: str | None = None  # binary sensor, on = someone in the room
     fine: str | None = None  # finer temperature sensor, for learning how fast the room cools
+    windows: list[str] = field(default_factory=list)  # open = airing
+    co2: str | None = None
+    recent: dict[str, deque] = field(default_factory=dict)  # fine/CO₂ readings of the last half hour
+    aired_until: datetime | None = None  # last time it was being aired
     tolerance: float | None = None  # overrides the hub's
     last_used: datetime | None = None  # last time someone had been in the room for IN_USE_AFTER
     logged: tuple | None = None
@@ -140,6 +147,8 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                 ),
                 occupancy=data.get(CONF_OCCUPANCY),
                 fine=data.get(CONF_FINE),
+                windows=list(data.get(CONF_WINDOWS) or []),
+                co2=data.get(CONF_CO2),
                 tolerance=data.get(CONF_TOLERANCE),
             )
             self._restore(room, saved.get(subentry.subentry_id, {}))
@@ -160,6 +169,12 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         )
         inputs = [e for e in (self.presence, self.daycare, self.outdoor_entity) if e]
         inputs += [room.occupancy for room in self.rooms.values() if room.occupancy]
+        inputs += [w for room in self.rooms.values() for w in room.windows]
+        readings = {e: room for room in self.rooms.values() for e in (room.fine, room.co2) if e}
+        if readings:
+            entry.async_on_unload(
+                async_track_state_change_event(self.hass, list(readings), partial(self._reading, readings))
+            )
         entry.async_on_unload(async_track_state_change_event(self.hass, inputs, self._input_changed))
         entry.async_on_unload(async_track_time_change(self.hass, self._calibrate_daily, hour=4, minute=30, second=0))
         entry.async_create_background_task(self.hass, self.async_calibrate(), f"{DOMAIN}_calibrate")
@@ -232,6 +247,37 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         except (AttributeError, TypeError, ValueError):
             pass  # keep the last good reading
         return self._outdoor
+
+    @callback
+    def _reading(self, readings: dict[str, RoomState], event: Event[EventStateChangedData]) -> None:
+        """Keep the last half hour of a room's fine temperature and CO₂, to spot an opened window."""
+        new = event.data["new_state"]
+        if new is None or not _number(new.state):
+            return
+        recent = readings[event.data["entity_id"]].recent.setdefault(event.data["entity_id"], deque())
+        recent.append((new.last_updated, float(new.state)))
+        while recent and new.last_updated - recent[0][0] > 2 * model.DROP_WINDOW:
+            recent.popleft()
+
+    def _airing(self, room: RoomState, now: datetime) -> tuple[datetime | None, bool]:
+        """(since when the room is being aired or None, whether an airing ended within the hour)."""
+        since = None
+        for entity_id in room.windows:
+            state = self.hass.states.get(entity_id)
+            if state is not None and state.state in WINDOW_OPEN and now - state.last_changed <= model.AIRING_MAX:
+                opened = dt_util.as_local(state.last_changed)
+                since = min(since or opened, opened)
+        drops = model.fast_drops(
+            list(room.recent.get(room.fine, ())) if room.fine else None,
+            list(room.recent.get(room.co2, ())) if room.co2 else None,
+        )
+        if drops and now - drops[-1][1] <= model.DROP_WINDOW:  # still falling a moment ago
+            began = dt_util.as_local(drops[-1][0])
+            since = min(since or began, began)
+        if since is not None:
+            room.aired_until = now
+            return since, False
+        return None, room.aired_until is not None and now - room.aired_until < model.AIRING_SETTLE
 
     def _used_ago(self, room: RoomState, now: datetime) -> float | None:
         """Hours since the room was last in use (0 while it is), None without an occupancy sensor."""
@@ -391,7 +437,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                     start,
                     now,
                 [room.nest for room in self.rooms.values()]
-                + [room.fine for room in self.rooms.values() if room.fine]
+                + [e for room in self.rooms.values() for e in (room.fine, room.co2, *room.windows) if e]
                 + [self.outdoor_entity],
                     significant_changes_only=False,
                 )
@@ -418,7 +464,12 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
             ]
             if not rows:
                 continue
-            found = model.extract(rows, outdoor, room.params, series(room.fine) if room.fine else None)
+            fine = series(room.fine) if room.fine else None
+            aired = model.fast_drops(fine, series(room.co2) if room.co2 else None)
+            for window in room.windows:
+                changes = [(dt_util.as_local(s.last_updated), s.state in WINDOW_OPEN) for s in states.get(window, [])]
+                aired += model.window_airings(changes, now)
+            found = model.extract(rows, outdoor, room.params, fine, aired)
             room.samples = model.merge(room.samples, found, now)
             room.params = model.fit(room.samples, now)
             LOGGER.info("Calibrated %s from %d runs: %s", room.name, len(found), room.params)
@@ -449,6 +500,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                 self._manual(room, float(target), now, "재시작 중 수동 변경")
 
         early = (room.memory.early_for, room.memory.early_predicted)
+        airing = self._airing(room, now)
         room.plan = planner.plan(
             room.room,
             room.params,
@@ -460,6 +512,8 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                 away=self._is_on(self.presence),
                 daycare=self._is_on(self.daycare),
                 used_ago=self._used_ago(room, now),
+                airing_since=airing[0],
+                aired_recently=airing[1],
             ),
             room.memory,
             room.tolerance if room.tolerance is not None else self.tolerance,
@@ -473,8 +527,10 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         if nest.state != HVACMode.HEAT or nest.attributes.get(ATTR_PRESET_MODE) == PRESET_ECO:  # type: ignore[union-attr]
             room.status = "paused"  # a person turned it off or to eco; leave it alone
             return
-        if plan.reason == "hold":
-            room.status = "hold"
+        if plan.reason == "hold" and not (
+            room.last_command is not None and target is not None and abs(target - room.last_command) < 0.01
+        ):
+            room.status = "hold"  # the person's value is on the Nest: hands off
             return
         if target is not None and abs(target - plan.setpoint) < 0.01:
             room.status, room.logged = "ok", None

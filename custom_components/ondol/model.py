@@ -15,6 +15,7 @@ room's own loss, where a daytime stretch carries sun and people.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime, timedelta
@@ -36,6 +37,14 @@ HALF_LIFE_DAYS = 30.0
 KEEP_DAYS = 90
 REFERENCE_OUTDOOR = 10.0
 NIGHT_FROM, NIGHT_UNTIL = 22, 7  # local hours: a quiet stretch centred here is a night
+
+# airing: a window open, or the air falling faster than any slab lets it
+AIRING_MAX = timedelta(hours=4)  # a window open longer than this is forgotten or stuck, not airing
+AIRING_SETTLE = timedelta(hours=1)  # the air takes about this long to settle back afterwards
+DROP_WINDOW = timedelta(minutes=15)
+DROP_TRIGGER = 0.4  # °C within DROP_WINDOW: a night cools ~0.03
+CO2_TRIGGER = 0.25  # share of CO₂ gone within DROP_WINDOW, next to a fine sensor's drop
+CO2_ONLY_TRIGGER = 0.4  # on its own: a door opened at night dips ~25 % and comes back, airing ~65 %
 
 
 @dataclass(frozen=True)
@@ -143,11 +152,75 @@ def _slope(series: Sequence[tuple[datetime, float]], start: datetime, end: datet
     return sum((x - mean_x) * (y - mean_y) for x, y in points) / spread if spread else None
 
 
+def _fall(series: Sequence[tuple[datetime, float]], times: list[datetime], when: datetime, share: bool) -> float:
+    """How far a series has fallen from its highest point in the DROP_WINDOW before ``when``."""
+    i, j = bisect_left(times, when - DROP_WINDOW), bisect_left(times, when, hi=len(times))
+    window = [v for t, v in series[i : j + 1] if t <= when]
+    if not window:
+        return 0.0
+    top, now = max(window), window[-1]
+    return (top - now) / top if share and top else top - now
+
+
+def fast_drops(
+    fine: Sequence[tuple[datetime, float]] | None, co2: Sequence[tuple[datetime, float]] | None
+) -> list[tuple[datetime, datetime]]:
+    """Stretches where a room's air fell like an opened window: the fine sensor down DROP_TRIGGER °C
+    and CO₂ down CO2_TRIGGER (CO2_ONLY_TRIGGER without a fine sensor) within 15 minutes. One lasts until
+    nothing new has fallen for 10 minutes, at most an hour (a window sensor covers longer airings)."""
+    if not fine and not co2:
+        return []
+    fine, co2 = fine or [], co2 or []
+    fine_times, co2_times = [t for t, _ in fine], [t for t, _ in co2]
+    found: list[tuple[datetime, datetime]] = []
+    start = end = None
+    lows: tuple[float, float] = (math.inf, math.inf)
+    for t, _ in fine or co2:
+        temp, air = _value_at(fine, t, math.inf), _value_at(co2, t, math.inf)
+        if start is None:
+            if all(
+                fall >= limit
+                for series, times, share, limit in (
+                    (fine, fine_times, False, DROP_TRIGGER),
+                    (co2, co2_times, True, CO2_TRIGGER if fine else CO2_ONLY_TRIGGER),
+                )
+                if series
+                for fall in (_fall(series, times, t, share),)
+            ):
+                start, end, lows = t - DROP_WINDOW, t, (temp, air)
+            continue
+        if temp < lows[0] - 0.04 or air < lows[1] * 0.98:  # still finding new lows
+            end, lows = t, (min(temp, lows[0]), min(air, lows[1]))
+        if t - end > timedelta(minutes=10) or t - start > timedelta(hours=1):
+            found.append((start, end))
+            start = None
+    if start is not None:
+        found.append((start, end))
+    return found
+
+
+def window_airings(
+    changes: Sequence[tuple[datetime, bool]], end_of_data: datetime
+) -> list[tuple[datetime, datetime]]:
+    """Open stretches of one window from (time, open) changes; one open longer than AIRING_MAX is
+    left out (forgotten or a stuck sensor)."""
+    found, opened = [], None
+    for t, is_open in [*changes, (end_of_data, False)]:
+        if is_open and opened is None:
+            opened = t
+        elif not is_open and opened is not None:
+            if t - opened <= AIRING_MAX:
+                found.append((opened, t))
+            opened = None
+    return found
+
+
 def extract(
     samples: Sequence[Sample],
     outdoor: Sequence[tuple[datetime, float]],
     params: Params,
     fine: Sequence[tuple[datetime, float]] | None = None,
+    aired: Sequence[tuple[datetime, datetime]] = (),
 ) -> list[dict]:
     """One sample per finished heating run in a history window, keyed by its start time.
 
@@ -175,6 +248,10 @@ def extract(
             start, unknown_start = None, False
     end_of_data = samples[-1][0]
 
+    def clear(start: datetime, end: datetime) -> bool:
+        """No airing, nor the hour the air takes to settle after one, between start and end."""
+        return not any(a < end and start < b + AIRING_SETTLE for a, b in aired)
+
     found = []
     for i, (on, off) in enumerate(runs):
         hours = _hours(off - on)
@@ -190,7 +267,12 @@ def extract(
             if on + timedelta(hours=params.dead_time) <= t <= off and (not highs or temp > highs[-1][1]):
                 highs.append((t, temp))
         net = params.net_rise(temp_on, out)
-        if len(highs) >= 2 and highs[-1][1] - highs[0][1] >= 0.3 and _hours(highs[-1][0] - highs[0][0]) >= 1:
+        if (
+            len(highs) >= 2
+            and highs[-1][1] - highs[0][1] >= 0.3
+            and _hours(highs[-1][0] - highs[0][0]) >= 1
+            and clear(on, off)
+        ):
             net = (highs[-1][1] - highs[0][1]) / _hours(highs[-1][0] - highs[0][0])
             mid = (highs[-1][1] + highs[0][1]) / 2
             sample["rise"] = round(net + params.loss * (mid - out), 4)
@@ -205,7 +287,7 @@ def extract(
                 ((t, temp) for t, temp in temps if on < t <= off and _snapped(temp, snap) >= start + step - 0.01),
                 None,
             )
-            if rising is not None:
+            if rising is not None and clear(on, rising[0]):
                 before = [(t, temp) for t, temp in temps if on < t < rising[0]]
                 lows = [(t, temp) for t, temp in before if _snapped(temp, snap) < start - 0.01]
                 if lows:
@@ -226,7 +308,7 @@ def extract(
                     sample["dead_time"] = round(dead, 3)
 
         # coast: a long run followed by at least 3 quiet hours
-        if hours >= 1.5 and _hours(quiet_after) >= 3:
+        if hours >= 1.5 and _hours(quiet_after) >= 3 and clear(off, off + timedelta(hours=3)):
             temp_off = _value_at(temps, off, temp_on)
             after = [(t, temp) for t, temp in temps if off < t <= off + timedelta(hours=3)]
             peak = max(after, key=lambda tv: tv[1], default=(off, temp_off))
@@ -238,7 +320,7 @@ def extract(
         # short by the morning block barely moves a Nest's 0.5 °C display, so a finer sensor's slope
         # is used when there is one (its offset doesn't matter for a slope).
         a, b = off + timedelta(hours=max(1.0, params.coast_time + 0.5)), off + quiet_after
-        if _hours(b - a) >= 2:
+        if _hours(b - a) >= 2 and clear(a, b):
             slope = _slope(fine, a, b) if fine else None
             drift = [(t, temp) for t, temp in temps if a <= t <= b]
             if slope is None and len(drift) >= 2 and _hours(drift[-1][0] - drift[0][0]) >= 2:

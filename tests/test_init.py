@@ -374,3 +374,74 @@ async def test_room_tolerance_and_the_report_after_an_early_stop(hass, entry, fr
         await refresh_at(hass, freezer, entry, "2026-10-27 07:01:00+09:00")
     assert calibrate.called  # learn from the night at once
     assert any(e.data["message"] == "조기 종료 결과: 07:00 예상 25.6°C, 실제 25.8°C" for e in events)
+
+
+async def _airing_entry(hass: HomeAssistant, freezer: FrozenDateTimeFactory) -> MockConfigEntry:
+    await hass.config.async_set_time_zone("Asia/Seoul")
+    freezer.move_to("2026-10-26 12:00:00+09:00")
+    set_nest(hass)
+    hass.states.async_set("sensor.outdoor", "8.0")
+    hass.states.async_set("cover.window", "closed")
+    hass.states.async_set("sensor.fine", "28.6")
+    hass.states.async_set("sensor.co2", "1400")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        options={"outdoor_entity": "sensor.outdoor", "tolerance": 0.5, "won_per_hour": 0},
+        unique_id=DOMAIN,
+        subentries_data=[
+            {
+                "data": {
+                    **ROOM,
+                    "follows_daycare": False,
+                    "window_entities": ["cover.window"],
+                    "fine_temperature_entity": "sensor.fine",
+                    "co2_entity": "sensor.co2",
+                },
+                "subentry_type": "room",
+                "title": "아기방",
+                "unique_id": NEST,
+            }
+        ],
+    )
+    entry.add_to_hass(hass)
+    await _setup(hass, entry)
+    return entry
+
+
+async def test_an_open_window_stops_heating_and_a_hold_comes_back(hass, freezer):
+    entry = await _airing_entry(hass, freezer)
+    calls = async_mock_service(hass, "climate", "set_temperature")
+    await control_on(hass, entry)
+    set_nest(hass, temperature=27.0)  # someone wants it warmer: a hold until 22:30
+    await hass.async_block_till_done()
+    room = next(iter(entry.runtime_data.rooms.values()))
+    assert room.plan.reason == "hold" and calls == []
+
+    freezer.move_to("2026-10-26 12:10:00+09:00")
+    hass.states.async_set("cover.window", "open")
+    await hass.async_block_till_done()
+    await refresh_at(hass, freezer, entry, "2026-10-26 12:11:00+09:00")
+    assert (room.plan.reason, room.plan.text) == ("airing", "환기 중 (12:10부터)")
+    assert calls[-1].data["temperature"] == 18.0
+    set_nest(hass, temperature=18.0)
+    await hass.async_block_till_done()
+
+    hass.states.async_set("cover.window", "closed")
+    await hass.async_block_till_done()
+    await refresh_at(hass, freezer, entry, "2026-10-26 12:31:00+09:00")
+    assert room.plan.reason == "hold" and calls[-1].data["temperature"] == 27.0  # their value is back
+
+
+async def test_a_window_opened_by_hand_is_spotted_from_the_air(hass, freezer):
+    entry = await _airing_entry(hass, freezer)
+    room = next(iter(entry.runtime_data.rooms.values()))
+    for minute in range(1, 21):  # Awair-like readings every minute: -0.5 °C and -45 % CO₂ in minutes 6-15
+        freezer.move_to(f"2026-10-26 12:{minute:02d}:00+09:00")
+        falling = min(max(minute - 5, 0), 10)
+        hass.states.async_set("sensor.fine", str(round(28.6 - 0.05 * falling, 2)))
+        hass.states.async_set("sensor.co2", str(round(1400 - 63 * falling)))
+        await hass.async_block_till_done()
+    await refresh_at(hass, freezer, entry, "2026-10-26 12:20:30+09:00")
+    assert room.plan.reason == "airing"
+    await refresh_at(hass, freezer, entry, "2026-10-26 13:00:00+09:00")
+    assert room.plan.reason != "airing"  # it stopped falling: the plan resumes

@@ -10,6 +10,9 @@ While a long heat-up is running the Nest aims 0.5 °C low, so the coast lands on
 A room with an occupancy sensor treats an eco block as comfort while it is in use (and for an
 hour after), and drops a comfort block to eco once nobody has used it for two hours. The slab
 answers hours late either way, so this is for rooms used off schedule, not a quick fix.
+
+While a room is being aired the Nest is set to the floor so it doesn't heat the open window; the
+plan itself carries on underneath, and an early stop isn't called off for the cold air.
 """
 
 from __future__ import annotations
@@ -47,6 +50,8 @@ class Now:
     away: bool = False
     daycare: bool = False
     used_ago: float | None = None  # hours since the room was last in use (0 = now); None: no sensor
+    airing_since: datetime | None = None  # a window open or the air falling like one, since then
+    aired_recently: bool = False  # airing ended less than an hour ago: the air is still settling
 
 
 @dataclass(frozen=True)
@@ -74,16 +79,19 @@ class Plan:
     target: float  # what the room should be at
     setpoint: float  # what the Nest is told
     preset: str | None  # None during a manual hold
-    reason: str  # schedule | daycare | occupied | empty | away | hold | preheat | early_stop
+    reason: str  # schedule | daycare | occupied | empty | away | hold | preheat | early_stop | airing
     block: Block | None = None  # the block a preheat or early stop is for
     lead: float | None = None  # hours of heating the preheat needs
     hold_until: datetime | None = None
     next_at: datetime | None = None
     next_text: str | None = None
+    airing_since: datetime | None = None
 
     @property
     def text(self) -> str:
         label = PRESET_LABELS.get(self.preset or "", "")
+        if self.reason == "airing" and self.airing_since:
+            return f"환기 중 ({self.airing_since:%H:%M}부터)"
         if self.reason == "preheat" and self.block:
             lead = f", {self.lead:.1f}시간 가동" if self.lead is not None and math.isfinite(self.lead) else ""
             return f"예열: {self.block.start:%H:%M} {label} {self.target:.1f}°C{lead}"
@@ -166,7 +174,12 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
                 continue
             need = params.lead(temp, goal - tolerance, now.outdoor)
             if mem.preheat_for != block.start:
-                if not _short_without_heat(params, now, block, goal, tolerance) or _hours(t, block.start) > need:
+                if (
+                    not _short_without_heat(params, now, block, goal, tolerance)
+                    or _hours(t, block.start) > need
+                    or now.airing_since
+                    or now.aired_recently  # the cold air of an airing isn't a reason to start
+                ):
                     continue
                 mem.preheat_for = block.start
             mem.hold = None  # the next block's preheat ends a manual hold, but never lowers it
@@ -179,7 +192,7 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
             at_end = params.idle(peak, now.outdoor, hours_left)
             # cooling faster than the model said (judged once the coast is over): heat again now,
             # since the slab answers late, and don't stop early again before this block
-            if mem.early_for == nxt.start and (
+            if mem.early_for == nxt.start and not (now.airing_since or now.aired_recently) and (
                 temp < target - tolerance
                 or (
                     _hours(mem.early_since or t, t) >= params.coast_time + 0.5
@@ -215,6 +228,8 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
     ):
         mem.phase = "normal"
     setpoint = setpoint_for(target - step if mem.phase in ("heatup", "coast") else target)
+    if now.airing_since:  # don't heat an open window; the floor still keeps the room from going cold
+        setpoint, reason = MIN_SETPOINT, "airing"
 
     next_at, next_text = _next(room, params, now, mem, tolerance, target, reason, ahead, preheatable, found)
     return Plan(
@@ -227,6 +242,7 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
         hold_until=mem.hold.until if mem.hold else None,
         next_at=next_at,
         next_text=next_text,
+        airing_since=now.airing_since,
     )
 
 

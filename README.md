@@ -27,6 +27,13 @@ slab can't reach and overshoots after it gets there. This integration:
   turns an eco block into comfort, kept for an hour after they leave; a comfort block nobody has
   used for two hours drops to eco until someone comes back. For rooms used off schedule, such as a
   home office in the evening or at weekends.
+- **Pauses for airing**: while a room's window is open (a cover or contact sensor), or its air falls
+  the way an opened window makes it (0.4 °C and a quarter of the CO₂ within 15 minutes, or 40 % of
+  the CO₂ for a room with only a CO₂ sensor), the thermostat is set to the 18 °C floor instead of
+  heating the open window. The plan carries on underneath and resumes when the window closes or the
+  air stops falling; an early stop isn't called off for the cold air, and the airing plus an hour
+  of settling stays out of everything the model learns. A window open over 4 hours counts as
+  forgotten (or a stuck sensor) and is ignored.
 - **Respects people**: a change made at the thermostat (or in its app, or by an automation) holds
   until the next schedule block. A preheat for that block may raise it, never lower it.
 - **Learns every room** from the thermostat's own history, every night at 04:30 and at start-up.
@@ -66,9 +73,9 @@ Then **Settings → Devices & services → Add integration → Ondol Heating**:
 | Cost per room heating hour | ₩ per room-hour from a heating bill; 0 hides the cost sensors |
 
 Add each room with **Add room**: its thermostat, the four preset temperatures (on the thermostat's
-own scale, 18–30 °C), whether it follows the daycare sensor, an optional occupancy sensor, an
-optional tolerance of its own, an optional finer temperature sensor for learning, and its weekly
-schedule:
+own scale, 18–30 °C), whether it follows the daycare sensor, and optionally an occupancy sensor,
+a tolerance of its own, a finer temperature sensor for learning, its windows and a CO₂ sensor;
+then its weekly schedule:
 
 ```text
 월-금 06:30 편안, 09:30 절약, 17:00 편안, 22:30 수면

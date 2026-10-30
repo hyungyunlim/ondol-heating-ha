@@ -16,6 +16,8 @@ CONF_SCHEDULE = "schedule"
 CONF_FOLLOWS_DAYCARE = "follows_daycare"
 CONF_OCCUPANCY = "occupancy_entity"  # on = someone in this room
 CONF_FINE = "fine_temperature_entity"  # finer, more frequent room sensor, only for learning
+CONF_WINDOWS = "window_entities"  # covers or contact sensors; open = airing
+CONF_CO2 = "co2_entity"  # with or without CONF_FINE, spots a window opened by hand
 # a room may also set CONF_TOLERANCE, overriding the hub's
 
 PRESETS = ("comfort", "sleep", "eco", "away")

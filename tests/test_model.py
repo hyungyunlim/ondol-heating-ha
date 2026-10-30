@@ -3,7 +3,7 @@ import json
 import math
 from pathlib import Path
 
-from custom_components.ondol.model import Params, extract, fit, merge
+from custom_components.ondol.model import Params, extract, fast_drops, fit, merge, window_airings
 
 UTC = UTC
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "nest_room_week.json").read_text())
@@ -122,3 +122,42 @@ def test_a_too_cold_early_stop_night_corrects_the_cooling():
     learned = fit(days + found, at(31))
     assert 0.0065 < learned.loss < 0.0078  # the night decides, not the five warm days
     assert fit(days, at(31)).loss < 0.004
+
+
+def _minutes(start: datetime, values: list[float]) -> list[tuple[datetime, float]]:
+    return [(start + timedelta(minutes=i), v) for i, v in enumerate(values)]
+
+
+def test_fast_drops_spot_an_opened_window_but_not_a_night():
+    start = datetime(2026, 10, 24, 10, 0, tzinfo=UTC)
+    aired = [28.6] * 10 + [round(28.6 - 0.05 * i, 2) for i in range(1, 11)] + [28.1] * 20  # -0.5 °C in 10 min
+    co2 = [1474.0] * 10 + [1474 - 68.3 * i for i in range(1, 11)] + [791.0] * 20  # -46 %
+    drops = fast_drops(_minutes(start, aired), _minutes(start, co2))
+    assert len(drops) == 1
+    began, ended = drops[0]
+    assert start <= began <= start + timedelta(minutes=10) and ended <= start + timedelta(minutes=25)
+
+    night = [round(26.0 - 0.12 * i / 60, 1) for i in range(300)]  # an early-stop night
+    assert fast_drops(_minutes(start, night), _minutes(start, [1150.0] * 300)) == []
+    assert fast_drops(_minutes(start, aired), _minutes(start, [1150.0] * 40)) == []  # air cooled, CO₂ kept: aircon
+    assert len(fast_drops(None, _minutes(start, co2))) == 1  # a room with only a CO₂ sensor
+
+
+def test_window_airings_skip_forgotten_or_stuck_windows():
+    t = datetime(2026, 10, 24, 10, 0, tzinfo=UTC)
+    changes = [(t, True), (t + timedelta(minutes=30), False), (t + timedelta(hours=2), True), (t + timedelta(hours=8), False)]
+    assert window_airings(changes, t + timedelta(days=1)) == [(t, t + timedelta(minutes=30))]
+    assert window_airings([(t, True)], t + timedelta(hours=1)) == [(t, t + timedelta(hours=1))]  # open now
+
+
+def test_an_aired_night_is_not_learned_but_a_normal_one_is():
+    from zoneinfo import ZoneInfo
+
+    day = datetime(2026, 10, 29, tzinfo=ZoneInfo("Asia/Seoul"))
+    at = lambda h, m=0: day + timedelta(hours=h, minutes=m)  # noqa: E731
+    rows = [(at(20), False, 25.8), (at(23), True, 25.8), (at(24), False, 25.8), (at(30, 30), True, 25.3)]
+    fine = [(at(24) + timedelta(minutes=i), round(28.6 - 0.12 * i / 60, 1)) for i in range(390)]
+    outdoor = [(at(20), 9.0)]
+    assert any(s.get("night") for s in extract(rows, outdoor, Params(), fine))
+    aired = [(at(27), at(27, 20))]  # a window opened at 03:00 for 20 minutes
+    assert not any(s.get("loss") is not None for s in extract(rows, outdoor, Params(), fine, aired))

@@ -27,6 +27,7 @@ from homeassistant.helpers.selector import (
 from . import schedule
 from .const import (
     CONF_CLIMATE,
+    CONF_CO2,
     CONF_DAYCARE,
     CONF_FINE,
     CONF_FOLLOWS_DAYCARE,
@@ -36,6 +37,7 @@ from .const import (
     CONF_PRESENCE,
     CONF_SCHEDULE,
     CONF_TOLERANCE,
+    CONF_WINDOWS,
     CONF_WON_PER_HOUR,
     DEFAULT_PRESETS,
     DEFAULT_SCHEDULE,
@@ -78,6 +80,8 @@ ROOM_SCHEMA = vol.Schema(
             NumberSelectorConfig(min=0.1, max=1.5, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_FINE): EntitySelector(EntitySelectorConfig(domain="sensor", device_class="temperature")),
+        vol.Optional(CONF_WINDOWS): EntitySelector(EntitySelectorConfig(domain=["cover", "binary_sensor"], multiple=True)),
+        vol.Optional(CONF_CO2): EntitySelector(EntitySelectorConfig(domain="sensor", device_class="carbon_dioxide")),
         vol.Required(CONF_SCHEDULE): TextSelector(TextSelectorConfig(multiline=True)),
     }
 )

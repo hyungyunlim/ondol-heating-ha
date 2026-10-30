@@ -212,3 +212,14 @@ def test_a_corrected_cooling_rate_and_a_tighter_tolerance_stop_later():
     assert tighter > before
     assert after is not None and after - before >= timedelta(hours=3)
     assert after <= at("06:00", day=1)
+
+
+def test_airing_during_an_early_stop_neither_heats_nor_calls_it_off():
+    mem = Memory()
+    assert plan(ROOM, PARAMS, now("01:00", 26.0, day=1), mem, TOL).reason == "early_stop"
+    aired = plan(ROOM, PARAMS, now("03:00", 25.2, day=1, airing_since=at("02:50", day=1)), mem, TOL)
+    assert (aired.reason, aired.setpoint, aired.text) == ("airing", 18.0, "환기 중 (02:50부터)")
+    assert mem.early_for == at("07:00", day=1) and mem.early_cancelled is None
+    settling = plan(ROOM, PARAMS, now("03:30", 25.4, day=1, aired_recently=True), mem, TOL)
+    assert settling.reason == "early_stop"  # the cold air is the window's, not the model's error
+    assert plan(ROOM, PARAMS, now("04:30", 25.8, day=1), mem, TOL).reason == "early_stop"
