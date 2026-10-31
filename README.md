@@ -35,7 +35,9 @@ slab can't reach and overshoots after it gets there. This integration:
   of settling stays out of everything the model learns. A window open over 4 hours counts as
   forgotten (or a stuck sensor) and is ignored.
 - **Respects people**: a change made at the thermostat (or in its app, or by an automation) holds
-  until the next schedule block. A preheat for that block may raise it, never lower it.
+  until the next schedule block, also while the house is away (warming a room on the way home).
+  A preheat for that block may raise it, never lower it. Holds from before an away end when the
+  away starts. While away with nothing due, the next action says what coming home would bring.
 - **Learns every room** from the thermostat's own history, every night at 04:30 and at start-up.
 
 It starts in an advisory mode that only logs what it would do.

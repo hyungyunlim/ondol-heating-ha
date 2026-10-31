@@ -1,6 +1,8 @@
 """Per-room decision: what the room should be at now, and which setpoint the Nest gets for it.
 
-Order of precedence: away > manual hold > daycare > occupancy > schedule. On top of that a warmer block
+Order of precedence: manual hold > away > daycare > occupancy > schedule. A person's setting holds
+until the next schedule block, also while the house is away (say, warming a room on the way home);
+holds from before an away are cleared when it starts, by the coordinator. On top of that a warmer block
 ahead starts early enough for the slab to get there (preheat), and before a cooler block the
 valve closes as soon as the slab's stored heat will carry the room to the end (early stop).
 While away nothing preheats, except a room that follows daycare while the child is there: it
@@ -17,7 +19,7 @@ plan itself carries on underneath, and an early stop isn't called off for the co
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 import math
 
@@ -59,6 +61,7 @@ class Hold:
     target: float
     until: datetime
     preset: str | None = None  # picked as a preset on our climate entity
+    since: datetime | None = None  # when it was set, to tell it from an away that began later
 
 
 @dataclass
@@ -139,12 +142,14 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
     lead: float | None = None
     found: list[tuple[datetime, str]] = []  # changes coming up, for the next-action text
 
-    if now.away:
-        mem.hold = mem.early_for = None
+    # while away nothing preheats, except for pickup, a predictable arrival: a child's room still
+    # warms up for today's comfort block while the child is at daycare
+    pickup = next((b for b in ahead if b.preset == "comfort" and b.start.date() == t.date()), None)
+    away_preheat = [pickup] if pickup and room.follows_daycare and now.daycare else []
+    if now.away and mem.hold is None:
+        mem.early_for = None
         target, preset, reason = room.presets["away"], "away", "away"
-        # pickup is a predictable arrival: a child's room still warms up for today's comfort block
-        pickup = next((b for b in ahead if b.preset == "comfort" and b.start.date() == t.date()), None)
-        preheatable = [pickup] if pickup and room.follows_daycare and now.daycare else []
+        preheatable = away_preheat
     else:
         block = block_at(room.entries, t)
         preset, reason = block.preset, "schedule"
@@ -165,7 +170,7 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
         target = room.presets[preset]
         if mem.hold:
             target, preset, reason = mem.hold.target, mem.hold.preset, "hold"
-        preheatable = ahead
+        preheatable = away_preheat if now.away else ahead
 
     if mem.preheat_for and (now.airing_since or now.aired_recently):
         mem.preheat_for = None  # latched on air an open window cooled, not on a cold room
@@ -266,7 +271,7 @@ def _next(
     t, temp = now.at, now.temp
     if mem.hold:
         found.append((mem.hold.until, f"{mem.hold.until:%H:%M} 수동 유지 끝"))
-    if ahead:
+    if ahead and not now.away:  # while away a block boundary changes nothing
         nxt = ahead[0]
         found.append((nxt.start, f"{nxt.start:%H:%M} {PRESET_LABELS[nxt.preset]} {room.presets[nxt.preset]:.1f}°C"))
     if temp is not None:
@@ -293,6 +298,9 @@ def _next(
                 if t < stop < nxt.start:
                     label = PRESET_LABELS[nxt.preset]
                     found.append((stop, f"{stop:%H:%M} 조기 종료 → {nxt.start:%H:%M} {label}"))
+    if not found and now.away:  # nothing will happen while away: say what coming home now brings
+        back = plan(room, params, replace(now, away=False), replace(mem), tolerance)
+        return None, f"귀가하면 {PRESET_LABELS.get(back.preset or '', '수동')} {back.target:.1f}°C"
     if not found:
         return None, None
     return min(found, key=lambda item: item[0])

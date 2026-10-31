@@ -103,10 +103,16 @@ def test_heatup_aims_low_then_holds_the_target():
 
 
 def test_away_and_daycare():
-    mem = Memory(hold=Hold(27.0, at("22:30")))
-    away = plan(ROOM, PARAMS, now("12:00", 25.0, away=True), mem, TOL)
+    away = plan(ROOM, PARAMS, now("12:00", 25.0, away=True), Memory(), TOL)
     assert (away.reason, away.preset, away.setpoint) == ("away", "away", 20.0)
-    assert mem.hold is None  # leaving ends a manual setting
+    assert away.next_text == "귀가하면 편안 25.0°C"  # nothing happens while away: what coming home brings
+    assert plan(ROOM, PARAMS, now("23:00", 25.0, away=True), Memory(), TOL).next_text == "귀가하면 수면 26.0°C"
+
+    # someone warming the room on the way home: their setting outranks away until the next block
+    mem = Memory(hold=Hold(26.5, at("22:30"), since=at("21:40")))
+    held = plan(ROOM, PARAMS, now("21:45", 24.0, away=True), mem, TOL)
+    assert (held.reason, held.setpoint, held.next_text) == ("hold", 26.5, "22:30 수동 유지 끝")
+    assert plan(ROOM, PARAMS, now("22:31", 25.0, away=True), mem, TOL).reason == "away"  # then away again
 
     daycare = plan(ROOM, PARAMS, now("12:00", 25.0, daycare=True), Memory(), TOL)
     assert (daycare.reason, daycare.preset, daycare.target) == ("daycare", "eco", 22.0)

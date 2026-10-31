@@ -121,6 +121,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         self.tolerance: float = options.get(CONF_TOLERANCE, DEFAULT_TOLERANCE)
         self.won_per_hour: float = options.get(CONF_WON_PER_HOUR) or 0.0
         self.control = False
+        self.away_since: datetime | None = None
         self.rooms: dict[str, RoomState] = {}
         self._outdoor = model.REFERENCE_OUTDOOR
         self._store: Store[dict[str, Any]] = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}")
@@ -131,6 +132,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
     async def _async_setup(self) -> None:
         stored = await self._store.async_load() or {}
         self.control = stored.get("control", False)
+        self.away_since = _when(stored.get("away_since"))  # survives a restart mid-away
         saved = stored.get("rooms", {})
         for subentry in self.config_entry.subentries.values():
             if subentry.subentry_type != SUBENTRY_ROOM:
@@ -194,7 +196,9 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         used = saved.get("last_used")  # unknown until someone has used the room: plain schedule
         room.last_used = datetime.fromisoformat(used) if used else None
         if hold := saved.get("hold"):
-            room.memory.hold = planner.Hold(hold["target"], datetime.fromisoformat(hold["until"]), hold.get("preset"))
+            room.memory.hold = planner.Hold(
+                hold["target"], datetime.fromisoformat(hold["until"]), hold.get("preset"), _when(hold.get("since"))
+            )
         # in-flight decisions, so a restart mid-preheat or mid-night keeps them
         mem = saved.get("memory") or {}
         room.memory.preheat_for, room.memory.early_for = _when(mem.get("preheat_for")), _when(mem.get("early_for"))
@@ -216,7 +220,14 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                 "today": room.today,
                 "month": room.month,
                 "last_used": room.last_used.isoformat() if room.last_used else None,
-                "hold": {"target": hold.target, "until": hold.until.isoformat(), "preset": hold.preset} if hold else None,
+                "hold": {
+                    "target": hold.target,
+                    "until": hold.until.isoformat(),
+                    "preset": hold.preset,
+                    "since": _iso(hold.since),
+                }
+                if hold
+                else None,
                 "memory": {
                     "preheat_for": _iso(mem.preheat_for),
                     "early_for": _iso(mem.early_for),
@@ -228,7 +239,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                     "early_cancelled": _iso(mem.early_cancelled),
                 },
             }
-        return {"control": self.control, "rooms": rooms}
+        return {"control": self.control, "away_since": _iso(self.away_since), "rooms": rooms}
 
     def _save(self) -> None:
         self._store.async_delay_save(self._snapshot, 30)
@@ -350,7 +361,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
     def _manual(self, room: RoomState, target: float, now: datetime, why: str) -> None:
         """A person set the Nest: keep their value until the next schedule block."""
         until = self.next_block_start(room, now)
-        room.memory.hold = planner.Hold(target, until)
+        room.memory.hold = planner.Hold(target, until, since=now)
         room.memory.preheat_for = room.memory.early_for = None
         room.pending = None
         self._log(room, ("manual", target, until), f"{why}: Nest {target:.1f}°C — {until:%H:%M}까지 유지")
@@ -501,6 +512,12 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
             if room.last_command is not None and target is not None and abs(target - room.last_command) >= 0.01:
                 self._manual(room, float(target), now, "재시작 중 수동 변경")
 
+        away = self._is_on(self.presence)
+        self.away_since = (self.away_since or now) if away else None
+        hold = room.memory.hold
+        if away and hold and (hold.since is None or hold.since < self.away_since):  # type: ignore[operator]
+            room.memory.hold = None  # set for people who have since left: don't heat the empty house
+            self._log(room, ("hold_cleared", self.away_since), f"외출 시작: 수동 {hold.target:.1f}°C 해제")
         early = (room.memory.early_for, room.memory.early_predicted)
         airing = self._airing(room, now)
         room.plan = planner.plan(
@@ -511,7 +528,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                 temp=float(temp) if _number(temp) else None,
                 outdoor=self.outdoor(),
                 heating=available and nest.attributes.get(ATTR_HVAC_ACTION) == HVACAction.HEATING,  # type: ignore[union-attr]
-                away=self._is_on(self.presence),
+                away=away,
                 daycare=self._is_on(self.daycare),
                 used_ago=self._used_ago(room, now),
                 airing_since=airing[0],
@@ -621,7 +638,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         room = self.rooms[subentry_id]
         now = dt_util.now()
         target = room.room.presets[preset] if preset else float(temperature)  # type: ignore[arg-type]
-        room.memory.hold = planner.Hold(target, self.next_block_start(room, now), preset)
+        room.memory.hold = planner.Hold(target, self.next_block_start(room, now), preset, now)
         room.memory.preheat_for = room.memory.early_for = None
         room.pending = None
         sent = await self._async_send(room, planner.setpoint_for(target), now, "직접 설정")

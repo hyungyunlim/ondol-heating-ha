@@ -454,3 +454,32 @@ async def test_turning_a_nest_back_on_is_not_a_manual_change(hass, entry, freeze
     await hass.async_block_till_done()
     room = next(iter(coordinator(entry).rooms.values()))
     assert room.memory.hold is None
+
+
+async def test_a_setting_made_while_away_stays_and_older_holds_go(hass, entry, freezer):
+    events = async_capture_events(hass, EVENT_ONDOL)
+    calls = async_mock_service(hass, "climate", "set_temperature")
+    await control_on(hass, entry)
+    set_nest(hass, temperature=27.0)  # a hold set while home
+    await hass.async_block_till_done()
+    room = next(iter(coordinator(entry).rooms.values()))
+    assert room.plan.reason == "hold"
+
+    hass.states.async_set("binary_sensor.away", "on")  # everyone left
+    await hass.async_block_till_done()
+    await refresh_at(hass, freezer, entry, "2026-10-26 12:30:00+09:00")
+    assert room.memory.hold is None and calls[-1].data["temperature"] == 20.0
+    assert any(e.data["message"] == "외출 시작: 수동 27.0°C 해제" for e in events)
+    set_nest(hass, temperature=20.0)
+    await hass.async_block_till_done()
+
+    freezer.move_to("2026-10-26 21:40:00+09:00")
+    set_nest(hass, temperature=26.5)  # warming the room on the way home
+    await hass.async_block_till_done()
+    await refresh_at(hass, freezer, entry, "2026-10-26 21:41:00+09:00")
+    assert (room.plan.reason, room.plan.target, len(calls)) == ("hold", 26.5, 1)  # not put back to 20
+
+    assert await hass.config_entries.async_unload(entry.entry_id)  # a restart, still away
+    await _setup(hass, entry)
+    room = next(iter(coordinator(entry).rooms.values()))
+    assert room.memory.hold is not None and room.plan.reason == "hold"
