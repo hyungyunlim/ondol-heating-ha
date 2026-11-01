@@ -81,6 +81,17 @@ class Params:
         """Room temperature after ``hours`` with the valve closed."""
         return outdoor + (temp - outdoor) * math.exp(-self.loss * max(hours, 0.0))
 
+    def heated(self, temp: float, outdoor: float, hours: float) -> float:
+        """Room temperature after ``hours`` with the valve open from ``temp`` (what ``lead`` solves)."""
+        start = self.idle(temp, outdoor, min(hours, self.dead_time))
+        if hours <= self.dead_time:
+            return start
+        rise = self.rise_at(outdoor)
+        if self.loss <= 1e-6:
+            return start + rise * (hours - self.dead_time)
+        ceiling = outdoor + rise / self.loss
+        return ceiling - (ceiling - start) * math.exp(-self.loss * (hours - self.dead_time))
+
     def lead(self, temp: float, goal: float, outdoor: float) -> float:
         """Hours from opening the valve now until the room reaches ``goal`` (inf if it can't)."""
         start = self.idle(temp, outdoor, self.dead_time)

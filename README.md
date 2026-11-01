@@ -39,6 +39,8 @@ slab can't reach and overshoots after it gets there. This integration:
   A preheat for that block may raise it, never lower it. Holds from before an away end when the
   away starts. While away with nothing due, the next action says what coming home would bring.
 - **Learns every room** from the thermostat's own history, every night at 04:30 and at start-up.
+- **Raises problems** for notifications: a room heating for hours without warming although the
+  model expected it to, a thermostat offline for 30 minutes, or one refusing commands.
 
 It starts in an advisory mode that only logs what it would do.
 
@@ -99,11 +101,27 @@ Per room (`<room> 온돌` device):
 | `sensor.<room>_ondol_next_action` | e.g. `20:58 예열 시작 → 22:30 수면 26.0°C` |
 | `sensor.<room>_ondol_heating_today` | hours the valve was open today |
 | `sensor.<room>_ondol_planned_heating` | 100 while the plan would have the valve open (judged on the real room), so advisory plans can be charted next to actual heating |
+| `binary_sensor.<room>_ondol_problem` | on while the room needs a person. Attributes: `kind` (`offline`, `failing` or `no_heat`, one at a time in that order), `reason` (one plain Korean sentence, also the climate entity's `problem` attribute), `since` (when it began), `room` |
 | dead time, rise rate, coast, idle drift | learned model, diagnostic |
 
 Decisions go to the logbook, one line each: `제안: Nest 27.0°C → 26.0°C — 일정 수면 26.0°C` in
 advisory mode, `Nest 25.5°C — 예열: 22:30 수면 26.0°C` once it controls, plus manual changes it
 noticed and any failed commands.
+
+## Problems
+
+Watched whatever the control switch or a hold says:
+
+- `no_heat`: the thermostat has called for heat (idle gaps up to 10 minutes included) for the
+  room's dead time plus 1.5 hours, the model expected the room at least 0.4 °C warmer than at the
+  start by now (at the current outdoor temperature, so a slab at its limit in a cold snap doesn't
+  count), and the room is certainly less than 0.15 °C warmer. A Nest reports the room in its
+  0.5 °C display steps, so that means a step below where the run started. It clears when the room
+  rises 0.3 °C above its lowest reading during a run, or the thermostat is turned off or to eco.
+  With October's models a room that stops warming is flagged after about 5–6 hours of heating
+  (up to 11 in a room that cools as slowly as 안방).
+- `offline`: the thermostat unavailable for 30 minutes, until it is back.
+- `failing`: three failed commands in a row, until one is confirmed.
 
 ## Taking control
 
@@ -116,7 +134,8 @@ otherwise each of its changes becomes a hold until the next block.
 - Never writes a setpoint below 18 °C, so a room left alone by it (or by a failure) stays warm.
 - At most 2 commands a minute and 12 an hour per thermostat (Nest allows 5 and 100, shared with
   every other app). A command the thermostat doesn't confirm within 10 minutes counts as failed.
-  Failures back off 5, 10, 20… minutes up to an hour; after three the room shows `error`.
+  Failures back off 5, 10, 20… minutes up to an hour; after three the room shows `error` and its
+  problem sensor turns on.
 - A thermostat that is off, in eco or unavailable is left alone. Unavailable presence or daycare
   sensors read as "home" and "not at daycare".
 

@@ -41,7 +41,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from . import model, planner, schedule
+from . import model, planner, problems, schedule
 from .const import (
     CONF_CLIMATE,
     CONF_CO2,
@@ -107,6 +107,11 @@ class RoomState:
     tolerance: float | None = None  # overrides the hub's
     last_used: datetime | None = None  # last time someone had been in the room for IN_USE_AFTER
     logged: tuple | None = None
+    run: problems.Run | None = None  # the Nest calling for heat, to spot a room that doesn't warm
+    no_heat: problems.Problem | None = None  # stays until the room warms or the Nest leaves heat mode
+    offline_since: datetime | None = None
+    failing_since: datetime | None = None  # first failure of the current streak
+    problem: problems.Problem | None = None  # the one shown
 
 
 class OndolCoordinator(DataUpdateCoordinator[None]):
@@ -206,6 +211,11 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         room.memory.phase_target, room.memory.phase_since = mem.get("phase_target"), _when(mem.get("phase_since"))
         room.memory.early_since, room.memory.early_predicted = _when(mem.get("early_since")), mem.get("early_predicted")
         room.memory.early_cancelled = _when(mem.get("early_cancelled"))
+        watch = saved.get("watch") or {}
+        room.run = problems.Run.from_dict(watch.get("run"))
+        if no_heat := watch.get("no_heat"):
+            room.no_heat = problems.Problem("no_heat", datetime.fromisoformat(no_heat["since"]), no_heat["reason"])
+        room.offline_since = _when(watch.get("offline_since"))
 
     def _snapshot(self) -> dict[str, Any]:
         now = dt_util.now()
@@ -237,6 +247,13 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                     "early_since": _iso(mem.early_since),
                     "early_predicted": mem.early_predicted,
                     "early_cancelled": _iso(mem.early_cancelled),
+                },
+                "watch": {
+                    "run": room.run.as_dict() if room.run else None,
+                    "no_heat": {"since": room.no_heat.since.isoformat(), "reason": room.no_heat.reason}
+                    if room.no_heat
+                    else None,
+                    "offline_since": _iso(room.offline_since),
                 },
             }
         return {"control": self.control, "away_since": _iso(self.away_since), "rooms": rooms}
@@ -499,7 +516,47 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
             except Exception:
                 LOGGER.exception("Planning %s failed", room.name)
                 room.status = "error"
+            try:  # apart from planning, so neither can stop the other
+                self._watch(room, now)
+            except Exception:
+                LOGGER.exception("Watching %s failed", room.name)
         self._save()
+
+    def _watch(self, room: RoomState, now: datetime) -> None:
+        """Spot a room heating without warming, and a Nest offline or refusing commands, whatever the
+        control switch or a hold says."""
+        nest = self.hass.states.get(room.nest)
+        if nest is None or nest.state in OFF:
+            room.offline_since = room.offline_since or (nest.last_changed if nest is not None else now)
+            nest = None
+        else:
+            room.offline_since = None
+        temp = nest.attributes.get(ATTR_CURRENT_TEMPERATURE) if nest is not None else None
+        temp = float(temp) if _number(temp) else None
+        heating = (
+            nest is not None
+            and nest.state == HVACMode.HEAT
+            and nest.attributes.get(ATTR_HVAC_ACTION) == HVACAction.HEATING
+        )
+        run = room.run = problems.follow(room.run, heating, temp, now)
+        if nest is not None and (nest.state != HVACMode.HEAT or nest.attributes.get(ATTR_PRESET_MODE) == PRESET_ECO):
+            room.no_heat = None  # turned off or to eco: whoever did it knows
+        elif run is not None and heating and temp is not None:
+            if room.no_heat is not None:
+                if temp - run.low >= problems.WARMED:
+                    room.no_heat = None
+            elif reason := problems.no_heat(run, temp, room.params, self.outdoor(), now):
+                room.no_heat = problems.Problem("no_heat", run.start, reason)
+        if room.offline_since is not None and now - room.offline_since >= problems.OFFLINE_AFTER:
+            room.problem = problems.Problem(
+                "offline", room.offline_since, "Nest 연결이 30분 넘게 끊겨서 일정대로 맞추지 못하고 있어요."
+            )
+        elif room.failures >= MAX_FAILURES:
+            room.problem = problems.Problem(
+                "failing", room.failing_since or now, f"Nest가 온도 변경을 계속 받지 않아요 ({MAX_FAILURES}회 실패)."
+            )
+        else:
+            room.problem = room.no_heat
 
     async def _async_run(self, room: RoomState, now: datetime) -> None:
         nest = self.hass.states.get(room.nest)
@@ -613,6 +670,8 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
 
     def _failed(self, room: RoomState, now: datetime, why: str) -> None:
         room.failures += 1
+        if room.failures == 1:
+            room.failing_since = now
         delay = min(timedelta(minutes=5) * 2 ** (room.failures - 1), timedelta(hours=1))
         room.retry_at = now + delay
         if room.failures >= MAX_FAILURES:

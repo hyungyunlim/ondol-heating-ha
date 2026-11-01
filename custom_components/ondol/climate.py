@@ -107,6 +107,7 @@ class OndolClimate(RoomEntity, ClimateEntity):
             "nest_setpoint": plan.setpoint if plan else None,
             "next_action": plan.next_text if plan else None,
             "hold_until": plan.hold_until.isoformat() if plan and plan.hold_until else None,
+            "problem": room.problem.reason if room.problem else None,
         }
 
     async def async_set_temperature(self, **kwargs: Any) -> None:

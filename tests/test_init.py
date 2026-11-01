@@ -120,6 +120,9 @@ async def test_entities(hass: HomeAssistant, entry: MockConfigEntry):
     assert float(hass.states.get(entity(hass, entry, "sensor", "rise_rate")).state) > 0
     assert "예열 시작" in hass.states.get(entity(hass, entry, "sensor", "next_action")).state
     assert hass.states.get(entity(hass, entry, "sensor", "planned_heating")).state == "0"
+    problem = hass.states.get(entity(hass, entry, "binary_sensor", "problem"))
+    assert (problem.state, problem.attributes["room"], problem.attributes["kind"]) == ("off", "아기방", None)
+    assert climate.attributes["problem"] is None
 
 
 async def test_advisory_logs_but_sends_nothing(hass, entry, calls, freezer):
@@ -483,3 +486,75 @@ async def test_a_setting_made_while_away_stays_and_older_holds_go(hass, entry, f
     await _setup(hass, entry)
     room = next(iter(coordinator(entry).rooms.values()))
     assert room.memory.hold is not None and room.plan.reason == "hold"
+
+
+def problem_state(hass: HomeAssistant, entry: MockConfigEntry):
+    return hass.states.get(entity(hass, entry, "binary_sensor", "problem"))
+
+
+async def test_a_room_heating_without_warming_is_a_problem_until_it_warms(hass, entry, freezer):
+    set_nest(hass, temperature=26.0, current=25.3, action="heating")  # the Nest calls for heat from 12:00
+    await hass.async_block_till_done()
+    for minutes in range(15, 6 * 60 + 1, 15):
+        if minutes == 60:
+            set_nest(hass, temperature=26.0, current=25.2, action="heating")  # cooler by a display step
+        await refresh_at(hass, freezer, entry, f"2026-10-26 {12 + minutes // 60:02d}:{minutes % 60:02d}:00+09:00")
+        if minutes == 5 * 60 + 30:
+            assert problem_state(hass, entry).state == "off"  # the model doesn't expect +0.4 °C yet
+    problem = problem_state(hass, entry)
+    reason = "5시간 45분째 난방 중인데 온도가 오르지 않아요 (25.3° → 25.2°, 예상 +0.4°). 구동기나 단지 난방 공급을 확인해 주세요."
+    assert (problem.state, problem.attributes["kind"], problem.attributes["reason"]) == ("on", "no_heat", reason)
+    assert problem.attributes["since"] == "2026-10-26T12:00:00+09:00"
+    assert hass.states.get(entity(hass, entry, "climate", "room")).attributes["problem"] == reason
+
+    assert await hass.config_entries.async_unload(entry.entry_id)  # a restart keeps it
+    await _setup(hass, entry)
+    assert problem_state(hass, entry).attributes["reason"] == reason
+
+    set_nest(hass, temperature=26.0, current=25.8, action="heating")  # warming again
+    await refresh_at(hass, freezer, entry, "2026-10-26 18:20:00+09:00")
+    assert problem_state(hass, entry).state == "off"
+    assert hass.states.get(entity(hass, entry, "climate", "room")).attributes["problem"] is None
+
+
+async def test_an_offline_or_failing_nest_is_a_problem(hass, entry, freezer):
+    hass.states.async_set(NEST, "unavailable", {})
+    await refresh_at(hass, freezer, entry, "2026-10-26 12:29:00+09:00")
+    assert problem_state(hass, entry).state == "off"
+    await refresh_at(hass, freezer, entry, "2026-10-26 12:31:00+09:00")
+    problem = problem_state(hass, entry)
+    assert (problem.state, problem.attributes["kind"], problem.attributes["since"]) == (
+        "on",
+        "offline",
+        "2026-10-26T12:00:00+09:00",
+    )
+    assert problem.attributes["reason"] == "Nest 연결이 30분 넘게 끊겨서 일정대로 맞추지 못하고 있어요."
+    set_nest(hass)
+    await refresh_at(hass, freezer, entry, "2026-10-26 12:32:00+09:00")
+    assert problem_state(hass, entry).state == "off"
+
+    async_mock_service(hass, "climate", "set_temperature", raise_exception=HomeAssistantError("limit"))
+    freezer.move_to("2026-10-26 17:00:00+09:00")
+    await control_on(hass, entry)
+    for when in ("17:06", "17:17"):
+        await refresh_at(hass, freezer, entry, f"2026-10-26 {when}:00+09:00")
+    problem = problem_state(hass, entry)
+    assert (problem.state, problem.attributes["kind"], problem.attributes["since"]) == (
+        "on",
+        "failing",
+        "2026-10-26T17:00:00+09:00",
+    )
+    assert problem.attributes["reason"] == "Nest가 온도 변경을 계속 받지 않아요 (3회 실패)."
+
+    hass.states.async_set(NEST, "unavailable", {})
+    await refresh_at(hass, freezer, entry, "2026-10-26 17:48:00+09:00")
+    assert problem_state(hass, entry).attributes["kind"] == "offline"  # shown first
+
+    calls = async_mock_service(hass, "climate", "set_temperature")
+    set_nest(hass)
+    await refresh_at(hass, freezer, entry, "2026-10-26 17:49:00+09:00")
+    assert problem_state(hass, entry).attributes["kind"] == "failing"
+    assert [c.data["temperature"] for c in calls] == [25.5]  # retried once back
+    set_nest(hass, temperature=25.5)  # the Nest takes it
+    await refresh_at(hass, freezer, entry, "2026-10-26 17:50:00+09:00")
+    assert problem_state(hass, entry).state == "off"
