@@ -446,8 +446,46 @@ async def test_a_window_opened_by_hand_is_spotted_from_the_air(hass, freezer):
         await hass.async_block_till_done()
     await refresh_at(hass, freezer, entry, "2026-10-26 12:20:30+09:00")
     assert room.plan.reason == "airing"
+    assert "12:06" <= f"{room.plan.airing_since:%H:%M}" <= "12:08"  # the fall, not the 15 min before it
     await refresh_at(hass, freezer, entry, "2026-10-26 13:00:00+09:00")
     assert room.plan.reason != "airing"  # it stopped falling: the plan resumes
+
+
+async def test_an_airing_shows_from_when_the_window_opened(hass, freezer):
+    """2026-11-02: windows opened at 10:02 read "환기 중 (09:49부터)" once the air's fall was spotted,
+    dated back the whole DROP_WINDOW, until the airing ended."""
+    entry = await _airing_entry(hass, freezer)
+    room = next(iter(entry.runtime_data.rooms.values()))
+
+    async def reading(minute: int) -> None:  # Awair-like: a step of noise, then falling fast from 12:06
+        freezer.move_to(f"2026-10-26 12:{minute:02d}:00+09:00")
+        falling = max(minute - 5, 0)
+        hass.states.async_set("sensor.fine", str(round(28.5 - 0.3 * falling if falling else 28.5 + minute % 2 / 10, 1)))
+        hass.states.async_set("sensor.co2", str(1400 - 100 * falling if falling else 1400 + 2 * (-1) ** minute))
+        await hass.async_block_till_done()
+
+    for minute in range(1, 5):
+        await reading(minute)
+    freezer.move_to("2026-10-26 12:04:30+09:00")
+    hass.states.async_set("cover.window", "open")
+    await hass.async_block_till_done()
+    await refresh_at(hass, freezer, entry, "2026-10-26 12:04:40+09:00")
+    assert room.plan.text == "환기 중 (12:04부터)"
+
+    for minute in range(5, 10):
+        await reading(minute)
+    await refresh_at(hass, freezer, entry, "2026-10-26 12:09:30+09:00")
+    assert room.plan.text == "환기 중 (12:04부터)"  # the air's fall is spotted now: still the window's time
+
+    for minute in range(10, 12):
+        await reading(minute)
+    freezer.move_to("2026-10-26 12:11:30+09:00")
+    hass.states.async_set("cover.window", "closed")
+    await hass.async_block_till_done()
+    for minute in range(12, 14):
+        await reading(minute)
+    await refresh_at(hass, freezer, entry, "2026-10-26 12:13:30+09:00")
+    assert room.plan.text == "환기 중 (12:04부터)"  # shut, still falling: the same airing
 
 
 async def test_turning_a_nest_back_on_is_not_a_manual_change(hass, entry, freezer):

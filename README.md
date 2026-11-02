@@ -31,9 +31,11 @@ slab can't reach and overshoots after it gets there. This integration:
   the way an opened window makes it (0.4 °C and a quarter of the CO₂ within 15 minutes, or 40 % of
   the CO₂ for a room with only a CO₂ sensor), the thermostat is set to the 18 °C floor instead of
   heating the open window. The plan carries on underneath and resumes when the window closes or the
-  air stops falling; an early stop isn't called off for the cold air, and the airing plus an hour
-  of settling stays out of everything the model learns. A window open over 4 hours counts as
-  forgotten (or a stuck sensor) and is ignored.
+  air stops falling; an early stop isn't called off for the cold air, no preheat is started or
+  announced from it until it has settled for an hour, and the airing plus that hour stays out of
+  everything the model learns. The plan reads `환기 중 (HH:MM부터)` from when the window opened, or
+  from when the air began to fall. A window open over 4 hours counts as forgotten (or a stuck
+  sensor) and is ignored.
 - **Respects people**: a change made at the thermostat (or in its app, or by an automation) holds
   until the next schedule block, also while the house is away (warming a room on the way home).
   A preheat for that block may raise it, never lower it. Holds from before an away end when the

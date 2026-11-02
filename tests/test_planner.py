@@ -246,3 +246,16 @@ def test_a_preheat_latched_on_aired_air_is_dropped():
     lead = params.lead(25.4, 26.0 - TOL, 8.0)
     assert 2 < lead < 5  # a few hours from the real room temperature, not 11.7
     assert recovered.next_text == f"{at('22:30') - timedelta(hours=lead):%H:%M} 예열 시작 → 22:30 수면 26.0°C"
+
+
+def test_no_preheat_is_announced_from_aired_air():
+    """2026-11-02: 안방 aired 10:03-10:17 and its Nest fell 25.7 → 23.5 °C; the card then said a preheat
+    for 23:00 starts at 10:47, in an empty room that needed none before the airing."""
+    anbang = Room(presets={"comfort": 23.0, "sleep": 25.5, "eco": 22.0, "away": 21.0}, entries=parse("매일 07:00 편안, 23:00 수면"))
+    params = Params(dead_time=1.487, rise=0.1762, loss=0.0025, coast=0.1065)  # learned that morning
+    t = datetime(2026, 11, 2, 10, 18, 8, tzinfo=KST)
+    unaware = plan(anbang, params, Now(at=t, temp=23.5, outdoor=11.4), Memory(), TOL)
+    assert unaware.next_text == "10:47 예열 시작 → 23:00 수면 25.5°C"
+    for airing in ({"airing_since": t - timedelta(minutes=15)}, {"aired_recently": True}):
+        p = plan(anbang, params, Now(at=t, temp=23.5, outdoor=11.4, **airing), Memory(), TOL)
+        assert p.next_text == "23:00 수면 25.5°C"  # as plan() won't start one now either

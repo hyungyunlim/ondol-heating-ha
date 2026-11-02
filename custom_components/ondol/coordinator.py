@@ -104,6 +104,7 @@ class RoomState:
     co2: str | None = None
     recent: dict[str, deque] = field(default_factory=dict)  # fine/CO₂ readings of the last half hour
     aired_until: datetime | None = None  # last time it was being aired
+    airing_since: datetime | None = None  # start of the airing going on, as shown
     tolerance: float | None = None  # overrides the hub's
     last_used: datetime | None = None  # last time someone had been in the room for IN_USE_AFTER
     logged: tuple | None = None
@@ -295,16 +296,19 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
             if state is not None and state.state in WINDOW_OPEN and now - state.last_changed <= model.AIRING_MAX:
                 opened = dt_util.as_local(state.last_changed)
                 since = min(since or opened, opened)
-        drops = model.fast_drops(
-            list(room.recent.get(room.fine, ())) if room.fine else None,
-            list(room.recent.get(room.co2, ())) if room.co2 else None,
-        )
+        fine = list(room.recent.get(room.fine, ())) if room.fine else None
+        co2 = list(room.recent.get(room.co2, ())) if room.co2 else None
+        drops = model.fast_drops(fine, co2)
         if drops and now - drops[-1][1] <= model.DROP_WINDOW:  # still falling a moment ago
-            began = dt_util.as_local(drops[-1][0])
-            since = min(since or began, began)
+            # an open window knows when it opened; the air only roughly when it began to fall
+            since = since or dt_util.as_local(model.drop_began(fine or co2 or [], drops[-1][0]))
         if since is not None:
             room.aired_until = now
+            # one airing keeps the start it showed first: a window shutting mid-airing doesn't hand it
+            # to the air's later guess
+            room.airing_since = since = min(room.airing_since or since, since)
             return since, False
+        room.airing_since = None
         return None, room.aired_until is not None and now - room.aired_until < model.AIRING_SETTLE
 
     def _used_ago(self, room: RoomState, now: datetime) -> float | None:

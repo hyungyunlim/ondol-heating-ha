@@ -213,6 +213,17 @@ def fast_drops(
     return found
 
 
+def drop_began(series: Sequence[tuple[datetime, float]], start: datetime) -> datetime:
+    """When a fall that ``fast_drops`` dated from ``start`` began, for showing: the last reading still
+    in the top quarter of the fall (a step of sensor noise at the top isn't a fall yet).
+    ``fast_drops`` reaches back the whole DROP_WINDOW, which only suits leaving airings out of learning."""
+    window = [(t, v) for t, v in series if start <= t <= start + DROP_WINDOW]
+    if not window:
+        return start
+    top, low = max(v for _, v in window), window[-1][1]
+    return max(t for t, v in window if v >= top - (top - low) / 4)
+
+
 def window_airings(
     changes: Sequence[tuple[datetime, bool]], end_of_data: datetime
 ) -> list[tuple[datetime, datetime]]:

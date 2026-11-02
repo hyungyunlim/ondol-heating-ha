@@ -277,8 +277,14 @@ def _next(
     if temp is not None:
         for block in preheatable:
             goal = room.presets[block.preset]
-            # announce only the preheats plan() will run: not for a room warm enough anyway
-            if goal > target and mem.preheat_for != block.start and _short_without_heat(params, now, block, goal, tolerance):
+            # announce only the preheats plan() will run: not for a room warm enough anyway, nor from
+            # the cold air of an airing
+            if (
+                goal > target
+                and mem.preheat_for != block.start
+                and not (now.airing_since or now.aired_recently)
+                and _short_without_heat(params, now, block, goal, tolerance)
+            ):
                 start = block.start - timedelta(hours=min(params.lead(temp, goal - tolerance, now.outdoor), 48))
                 if t < start < block.start:
                     label = PRESET_LABELS[block.preset]

@@ -3,7 +3,7 @@ import json
 import math
 from pathlib import Path
 
-from custom_components.ondol.model import Params, extract, fast_drops, fit, merge, window_airings
+from custom_components.ondol.model import Params, drop_began, extract, fast_drops, fit, merge, window_airings
 
 UTC = UTC
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "nest_room_week.json").read_text())
@@ -141,6 +141,18 @@ def test_fast_drops_spot_an_opened_window_but_not_a_night():
     assert fast_drops(_minutes(start, night), _minutes(start, [1150.0] * 300)) == []
     assert fast_drops(_minutes(start, aired), _minutes(start, [1150.0] * 40)) == []  # air cooled, CO₂ kept: aircon
     assert len(fast_drops(None, _minutes(start, co2))) == 1  # a room with only a CO₂ sensor
+
+
+def test_drop_began_dates_the_fall_not_the_window_before_it():
+    """2026-11-02 업무방 (CO₂ only): the air had been sinking slowly when its window opened at 10:02;
+    the airing showed as from 09:57, the whole DROP_WINDOW before the reading that tripped it."""
+    start = datetime(2026, 11, 2, 0, 45, tzinfo=UTC)  # 09:45 KST, a reading a minute
+    co2 = [1052, 1051, 1050, 1047, 1041, 1040, 1041, 1041, 1037, 1035, 1032, 1031, 1029, 1027, 1025, 1018, 1015, 1023]
+    co2 += [1008, 963, 908, 755, 711, 695, 696, 685, 657, 606, 582, 571, 558, 552, 518, 507, 493, 488]
+    series = _minutes(start, co2)
+    ((began, _),) = fast_drops(None, series)
+    assert began == start + timedelta(minutes=12)  # 09:57, still what learning leaves out
+    assert drop_began(series, began) == start + timedelta(minutes=19)  # 10:04: a quarter of the fall gone
 
 
 def test_window_airings_skip_forgotten_or_stuck_windows():
