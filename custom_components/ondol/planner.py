@@ -4,7 +4,11 @@ Order of precedence: manual hold > away > daycare > occupancy > schedule. A pers
 until the next schedule block, also while the house is away (say, warming a room on the way home);
 holds from before an away are cleared when it starts, by the coordinator. On top of that a warmer block
 ahead starts early enough for the slab to get there (preheat), and before a cooler block the
-valve closes as soon as the slab's stored heat will carry the room to the end (early stop).
+valve closes as soon as the slab's stored heat will carry the room to the end (early stop). That
+is judged on a finer sensor's reading where it shows the room cooler than the Nest's last report
+(which can be hours old), and not during or right after a short heat pulse (it barely charges the
+slab, and the room falls fast from its peak). Once stopped, it isn't called off in the block's last
+dead time, since heat from then on lands after the block starts.
 While away nothing preheats, except a room that follows daycare while the child is there: it
 still warms up for today's next comfort block, since pickup brings someone home.
 While a long heat-up is running the Nest aims 0.5 °C low, so the coast lands on the target.
@@ -31,6 +35,10 @@ HORIZON_HOURS = 18  # a warmer block further ahead than this can't need heat yet
 # ponytail: stop at most this long before a block ends (the slab held 3-6 h in Oct 2026); longer
 # extrapolations lean too hard on the learned loss. Make it per-room if winter data says so.
 EARLY_STOP_HOURS = 6
+PULSE_HOURS = 1.5  # a shorter heating run is a pulse: it barely charges the slab (coast is learned from longer)
+# ponytail: an hour past the coast's peak covers a 30-min pulse's fast fall (아기방, Nov 2026); a
+# room that falls longer after its pulses would need this learned
+SETTLE_HOURS = 1.0
 STEP = 0.5  # Nest setpoints move in 0.5 °C steps
 IN_USE_HOURS = 1.0  # a room still counts as in use this long after people leave
 EMPTY_HOURS = 2.0  # a comfort block nobody has used for this long drops to eco
@@ -54,6 +62,8 @@ class Now:
     used_ago: float | None = None  # hours since the room was last in use (0 = now); None: no sensor
     airing_since: datetime | None = None  # a window open or the air falling like one, since then
     aired_recently: bool = False  # airing ended less than an hour ago: the air is still settling
+    fresh: float | None = None  # the room now, by a finer sensor's change since the Nest last reported
+    run: tuple[datetime, datetime | None] | None = None  # the Nest's heating run, now (no end) or last
 
 
 @dataclass(frozen=True)
@@ -120,6 +130,12 @@ def _hours(start: datetime, end: datetime) -> float:
 def _short_without_heat(params: Params, now: Now, block: Block, goal: float, tolerance: float) -> bool:
     """Whether the room would miss the block's goal if left alone; only then is a preheat due."""
     return params.idle(now.temp, now.outdoor, _hours(now.at, block.start)) < goal - tolerance  # type: ignore[arg-type]
+
+
+def _level(temp: float, fresh: float | None) -> float:
+    """The room for an early stop: a finer sensor shows a fall the Nest hasn't reported yet. A rise
+    it shows isn't taken, since stopping early on too warm a reading is what goes wrong."""
+    return temp if fresh is None else min(temp, fresh)
 
 
 def setpoint_for(target: float) -> float:
@@ -196,24 +212,39 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
 
         if reason in ("schedule", "daycare") and ahead and room.presets[ahead[0].preset] < target:
             nxt = ahead[0]
-            peak = temp + (params.coast if now.heating else 0.0)
+            level = _level(temp, now.fresh)
+            peak = level + (params.coast if now.heating else 0.0)
             hours_left = _hours(t, nxt.start)
             at_end = params.idle(peak, now.outdoor, hours_left)
             # cooling faster than the model said (judged once the coast is over): heat again now,
-            # since the slab answers late, and don't stop early again before this block
-            if mem.early_for == nxt.start and not (now.airing_since or now.aired_recently) and (
-                temp < target - tolerance
-                or (
-                    _hours(mem.early_since or t, t) >= params.coast_time + 0.5
-                    and params.idle(temp, now.outdoor, hours_left) < target - tolerance - 0.05
+            # since the slab answers late, and don't stop early again before this block; not in its
+            # last dead time, when that heat would land after the block starts
+            if (
+                mem.early_for == nxt.start
+                and hours_left > params.dead_time
+                and not (now.airing_since or now.aired_recently)
+                and (
+                    level < target - tolerance
+                    or (
+                        _hours(mem.early_since or t, t) >= params.coast_time + 0.5
+                        and params.idle(level, now.outdoor, hours_left) < target - tolerance - 0.05
+                    )
                 )
             ):
                 mem.early_for, mem.early_cancelled = None, nxt.start
+            # not during a heat pulse nor until it has settled: a pulse cut short gives no coast, and
+            # from a pulse's peak the room falls faster than the model for a while
+            run = now.run
+            settled = run is None or (
+                _hours(run[0], run[1] or t) >= PULSE_HOURS
+                or (run[1] is not None and _hours(run[1], t) >= params.coast_time + SETTLE_HOURS)
+            )
             # only worth it if the Nest would otherwise heat before the block ends
             if mem.early_for == nxt.start or (
                 mem.early_cancelled != nxt.start
+                and settled
                 and hours_left <= EARLY_STOP_HOURS
-                and temp >= target - tolerance
+                and level >= target - tolerance
                 and target - tolerance <= at_end
                 and (now.heating or at_end < target)
             ):
@@ -296,10 +327,11 @@ def _next(
             and mem.early_cancelled != ahead[0].start
         ):
             nxt = ahead[0]
-            peak = temp + (params.coast if now.heating else 0.0)
+            level = _level(temp, now.fresh)
+            peak = level + (params.coast if now.heating else 0.0)
             stay = params.hold(peak, target - tolerance, now.outdoor)
             needed = params.hold(peak, target, now.outdoor)  # until then the room needs no heat at all
-            if math.isfinite(stay) and temp >= target - tolerance and needed < _hours(t, nxt.start):
+            if math.isfinite(stay) and level >= target - tolerance and needed < _hours(t, nxt.start):
                 stop = nxt.start - timedelta(hours=min(stay, EARLY_STOP_HOURS))
                 if t < stop < nxt.start:
                     label = PRESET_LABELS[nxt.preset]

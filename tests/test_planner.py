@@ -259,3 +259,52 @@ def test_no_preheat_is_announced_from_aired_air():
     for airing in ({"airing_since": t - timedelta(minutes=15)}, {"aired_recently": True}):
         p = plan(anbang, params, Now(at=t, temp=23.5, outdoor=11.4, **airing), Memory(), TOL)
         assert p.next_text == "23:00 수면 25.5°C"  # as plan() won't start one now either
+
+
+AGIBANG = Room(
+    presets={"comfort": 25.0, "sleep": 26.0, "eco": 22.0, "away": 21.0},
+    entries=parse("월-금 08:30 편안, 17:00 편안\n토,일 09:00 편안\n매일 22:30 수면"),
+    follows_daycare=True,
+)
+NOV = Params(dead_time=1.36, rise=0.28, loss=0.0058, coast=0.16, coast_time=0.86)  # 아기방, mid-November
+
+
+def nov(hm: str, day: int, **kwargs) -> Now:
+    hour, minute = map(int, hm.split(":"))
+    return Now(at=datetime(2026, 11, day, hour, minute, tzinfo=KST), outdoor=13.0, **kwargs)
+
+
+def test_an_early_stop_is_judged_on_a_finer_sensors_fall():
+    """2026-11-17 02:53: 아기방's Nest still said 26.3 from 00:07 while its Awair had fallen 0.5; the
+    stop latched on 26.3 and was called off at 04:19, cooling faster than predicted."""
+    assert plan(AGIBANG, NOV, nov("02:53", 17, temp=26.3), Memory(), 0.3).reason == "early_stop"
+    fresh = plan(AGIBANG, NOV, nov("02:53", 17, temp=26.3, fresh=25.8), Memory(), 0.3)
+    assert (fresh.reason, fresh.setpoint) == ("schedule", 26.0)
+    # a rise the Nest hasn't reported isn't taken: it could only stop early sooner
+    assert plan(AGIBANG, NOV, nov("02:53", 17, temp=25.8, fresh=26.3), Memory(), 0.3).reason == "schedule"
+
+
+def test_no_early_stop_during_or_right_after_a_heat_pulse():
+    """2026-11-13 03:49: 아기방 latched an hour after a 32-min pulse, at its peak; the room then fell
+    0.3 °C/h for two hours and the stop was called off at 05:38."""
+    pulse = (datetime(2026, 11, 13, 2, 9, tzinfo=KST), datetime(2026, 11, 13, 2, 41, tzinfo=KST))
+    assert plan(AGIBANG, NOV, nov("03:50", 13, temp=26.2), Memory(), 0.3).reason == "early_stop"  # not knowing
+    assert plan(AGIBANG, NOV, nov("03:50", 13, temp=26.2, run=pulse), Memory(), 0.3).reason == "schedule"
+    running = (datetime(2026, 11, 13, 3, 40, tzinfo=KST), None)
+    assert plan(AGIBANG, NOV, nov("03:50", 13, temp=26.2, heating=True, run=running), Memory(), 0.3).reason == "schedule"
+    # settled, an hour past the coast's peak
+    assert plan(AGIBANG, NOV, nov("04:45", 13, temp=26.2, run=pulse), Memory(), 0.3).reason == "early_stop"
+    # a long run has charged the slab: cutting it short is what the early stop is for (안방 at 01:00)
+    long_run = (datetime(2026, 11, 13, 2, 0, tzinfo=KST), None)
+    assert plan(AGIBANG, NOV, nov("03:50", 13, temp=26.0, heating=True, run=long_run), Memory(), 0.3).reason == "early_stop"
+
+
+def test_an_early_stop_isnt_called_off_in_its_last_dead_time():
+    """2026-11-11 08:18: 아기방 called its stop off 12 minutes before 08:30 and heated, for nothing."""
+    mem = Memory()
+    assert plan(AGIBANG, NOV, nov("04:50", 11, temp=26.1), mem, 0.3).reason == "early_stop"
+    late = plan(AGIBANG, NOV, nov("08:18", 11, temp=25.6), mem, 0.3)  # under 26 - 0.3, but heat lands after 08:30
+    assert (late.reason, late.setpoint) == ("early_stop", 25.0)
+    earlier = Memory()
+    plan(AGIBANG, NOV, nov("04:50", 11, temp=26.1), earlier, 0.3)
+    assert plan(AGIBANG, NOV, nov("06:00", 11, temp=25.6), earlier, 0.3).reason == "schedule"  # still in time

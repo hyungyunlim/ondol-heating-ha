@@ -71,6 +71,7 @@ PER_HOUR = 12
 CONFIRM_WITHIN = timedelta(minutes=10)  # the Nest reports a new setpoint through Pub/Sub
 MAX_FAILURES = 3
 IN_USE_AFTER = timedelta(minutes=10)  # someone walking past an occupancy sensor isn't using the room
+REPORT_STEP = 0.5  # °C a Nest's room moves before it reports again, so its reading is never further off
 HISTORY_DAYS = 7
 OFF = (None, STATE_UNAVAILABLE, STATE_UNKNOWN)
 WINDOW_OPEN = ("open", "opening", "closing", STATE_ON)  # a pusher on its way is still open
@@ -93,13 +94,16 @@ class RoomState:
     sent: deque[datetime] = field(default_factory=deque)
     failures: int = 0
     retry_at: datetime | None = None
-    heating_since: datetime | None = None
+    heating_since: datetime | None = None  # moved on as heating hours are counted
+    run_since: datetime | None = None  # start of the Nest's heating run going on
+    last_run: tuple[datetime, datetime] | None = None
     today: list = field(default_factory=lambda: ["", 0.0])  # [date, hours]
     month: list = field(default_factory=lambda: ["", 0.0])  # [YYYY-MM, hours]
     checked: bool = False  # compared the Nest with last_command after a restart
     last_call: tuple[datetime, str] | None = None  # someone else's climate call on this Nest: (when, origin)
     occupancy: str | None = None  # binary sensor, on = someone in the room
     fine: str | None = None  # finer temperature sensor, for learning how fast the room cools
+    fine_at_report: float | None = None  # its reading when the Nest last reported a new temperature
     windows: list[str] = field(default_factory=list)  # open = airing
     co2: str | None = None
     recent: dict[str, deque] = field(default_factory=dict)  # fine/CO₂ readings of the last half hour
@@ -311,6 +315,19 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         room.airing_since = None
         return None, room.aired_until is not None and now - room.aired_until < model.AIRING_SETTLE
 
+    def _reading_of(self, entity_id: str | None) -> float | None:
+        state = self.hass.states.get(entity_id) if entity_id else None
+        return float(state.state) if state is not None and _number(state.state) else None
+
+    def _fresh(self, room: RoomState, temp: Any) -> float | None:
+        """The room now: the Nest's last report moved on by what the finer sensor has seen since
+        (its offset cancels out), never further than the Nest would have let pass unreported."""
+        fine = self._reading_of(room.fine)
+        if fine is None or room.fine_at_report is None or not _number(temp):
+            return None
+        reading = float(temp)
+        return min(max(reading + fine - room.fine_at_report, reading - REPORT_STEP), reading + REPORT_STEP)
+
     def _used_ago(self, room: RoomState, now: datetime) -> float | None:
         """Hours since the room was last in use (0 while it is), None without an occupancy sensor."""
         if not room.occupancy:
@@ -361,6 +378,9 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         old, new = event.data["old_state"], event.data["new_state"]
         now = dt_util.now()
         self._track_heating(room, new, now)
+        reported = new.attributes.get(ATTR_CURRENT_TEMPERATURE) if new is not None else None
+        if reported is not None and (old is None or old.attributes.get(ATTR_CURRENT_TEMPERATURE) != reported):
+            room.fine_at_report = self._reading_of(room.fine)
         # a setpoint someone chose only counts between two heating states: turning a Nest back on
         # brings back its old setpoint, which nobody just picked
         if old is None or new is None or old.state != HVACMode.HEAT or new.state != HVACMode.HEAT:
@@ -405,6 +425,10 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
             room.heating_since = now
         elif not heating:
             room.heating_since = None
+        if heating and room.run_since is None:
+            room.run_since = now
+        elif not heating and room.run_since is not None:
+            room.last_run, room.run_since = (room.run_since, now), None
 
     def _settle(self, room: RoomState, now: datetime) -> None:
         """Move heating time up to now into today's and this month's totals, split at midnight."""
@@ -570,6 +594,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         if available and not room.checked:
             room.checked = True
             self._track_heating(room, nest, now)
+            room.fine_at_report = self._reading_of(room.fine)  # take the Nest's reading as current
             if room.last_command is not None and target is not None and abs(target - room.last_command) >= 0.01:
                 self._manual(room, float(target), now, "재시작 중 수동 변경")
 
@@ -581,6 +606,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
             self._log(room, ("hold_cleared", self.away_since), f"외출 시작: 수동 {hold.target:.1f}°C 해제")
         early = (room.memory.early_for, room.memory.early_predicted)
         airing = self._airing(room, now)
+        heating = available and nest.attributes.get(ATTR_HVAC_ACTION) == HVACAction.HEATING  # type: ignore[union-attr]
         room.plan = planner.plan(
             room.room,
             room.params,
@@ -588,12 +614,14 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                 at=now,
                 temp=float(temp) if _number(temp) else None,
                 outdoor=self.outdoor(),
-                heating=available and nest.attributes.get(ATTR_HVAC_ACTION) == HVACAction.HEATING,  # type: ignore[union-attr]
+                heating=heating,
                 away=away,
                 daycare=self._is_on(self.daycare),
                 used_ago=self._used_ago(room, now),
                 airing_since=airing[0],
                 aired_recently=airing[1],
+                fresh=self._fresh(room, temp),
+                run=(room.run_since, None) if heating and room.run_since else room.last_run,
             ),
             room.memory,
             room.tolerance if room.tolerance is not None else self.tolerance,

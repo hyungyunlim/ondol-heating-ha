@@ -16,7 +16,11 @@ slab can't reach and overshoots after it gets there. This integration:
 - **Stops early**: before a cooler block it closes the valve as soon as the slab's stored heat will
   carry the room to the end of the block, within a tolerance (per room if needed: a child's room
   can have a tighter one). If the room then cools faster than predicted, it heats again at once
-  rather than waiting until it is already too cold, and logs how each early stop turned out.
+  rather than waiting until it is already too cold, and logs how each early stop turned out. A
+  Nest reports only every ~0.5 °C, so a room with a finer sensor is judged by how far that sensor
+  has fallen since the Nest's last report. It doesn't stop during a short heat pulse or in the
+  hour or two after one (the room falls fast from a pulse's peak), and once stopped it doesn't
+  heat again in the block's last dead time, since that heat would only land after the block starts.
 - **Lets the slab coast**: during a long heat-up the thermostat aims 0.5 °C low, then holds the
   target once the coast has peaked.
 - **Follows presence and daycare**: away on a certain-absence sensor; a child's room uses eco

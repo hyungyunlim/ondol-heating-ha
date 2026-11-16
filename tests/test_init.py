@@ -596,3 +596,42 @@ async def test_an_offline_or_failing_nest_is_a_problem(hass, entry, freezer):
     set_nest(hass, temperature=25.5)  # the Nest takes it
     await refresh_at(hass, freezer, entry, "2026-10-26 17:50:00+09:00")
     assert problem_state(hass, entry).state == "off"
+
+
+async def test_an_early_stop_sees_a_fall_the_nest_hasnt_reported(hass, freezer):
+    """The Nest reports in ~0.5 °C steps, so at 01:00 it can still show 23:00's 26.3 while the room is
+    0.5 lower; the finer sensor's fall since that report counts (아기방, 2026-11-17)."""
+    entry = await _airing_entry(hass, freezer)
+    room = next(iter(entry.runtime_data.rooms.values()))
+    set_nest(hass, temperature=26.0)  # someone's setting at noon, held until 22:30
+    hass.states.async_set("sensor.fine", "28.8")
+    freezer.move_to("2026-10-26 23:00:00+09:00")
+    set_nest(hass, temperature=26.0, current=26.3)
+    await hass.async_block_till_done()
+    for hm, fine in (("23:40", "28.7"), ("00:20", "28.5"), ("00:50", "28.3")):
+        freezer.move_to(f"2026-10-2{6 if hm > '12' else 7} {hm}:00+09:00")
+        hass.states.async_set("sensor.fine", fine)
+        await hass.async_block_till_done()
+    await refresh_at(hass, freezer, entry, "2026-10-27 01:00:00+09:00")  # 6 h before 07:00
+    assert (room.plan.reason, room.plan.setpoint) == ("schedule", 26.0)  # 25.8 won't last until 07:00
+
+    hass.states.async_set("sensor.fine", "28.8")  # back where it was when the Nest reported
+    await refresh_at(hass, freezer, entry, "2026-10-27 01:05:00+09:00")
+    assert room.plan.reason == "early_stop"
+
+
+async def test_a_heat_pulse_holds_off_an_early_stop_until_it_settles(hass, entry, freezer):
+    room = next(iter(coordinator(entry).rooms.values()))
+    set_nest(hass, temperature=26.0, current=26.0)  # someone's setting at noon, held until 22:30
+    await hass.async_block_till_done()
+    freezer.move_to("2026-10-27 00:00:00+09:00")
+    set_nest(hass, temperature=26.0, current=26.0, action="heating")
+    await hass.async_block_till_done()
+    freezer.move_to("2026-10-27 00:30:00+09:00")
+    set_nest(hass, temperature=26.0, current=26.0)
+    await hass.async_block_till_done()
+    assert room.last_run == (dt_util.parse_datetime("2026-10-27 00:00:00+09:00"), dt_util.parse_datetime("2026-10-27 00:30:00+09:00"))
+    await refresh_at(hass, freezer, entry, "2026-10-27 01:00:00+09:00")
+    assert room.plan.reason == "schedule"  # 30 min after a 30-min pulse: the room is at its peak
+    await refresh_at(hass, freezer, entry, "2026-10-27 02:30:00+09:00")
+    assert room.plan.reason == "early_stop"  # coast_time + 1 h after it
