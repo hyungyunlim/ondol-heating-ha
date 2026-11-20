@@ -6,17 +6,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .model import Params
+import math
 
 GAP = timedelta(minutes=10)  # idling this briefly doesn't end a heating run
 BLIND = timedelta(minutes=30)  # not watched this long (Home Assistant down): the run is unknown
 OFFLINE_AFTER = timedelta(minutes=30)
-JUDGE_AFTER = 1.5  # hours past the dead time before a run is judged
-EXPECTED = 0.4  # °C the model must expect by now; less is a slow room (a cold snap), not a fault
-FLAT = 0.15  # °C the room rose at most
+JUDGE_AFTER = 1.5  # hours past the dead time before a call is judged
+FELL = 0.2  # °C a finer sensor has fallen below the call's start (it reads in 0.1 °C steps)
+STEP_FELL = 0.45  # a Nest reads in 0.5 °C steps: a whole step lower
 WARMED = 0.3  # °C above the run's lowest reading: it heats again
 
 
@@ -25,10 +22,12 @@ class Run:
     """The thermostat calling for heat, idle gaps up to GAP included."""
 
     start: datetime
-    temp: float  # room at the start
-    low: float  # lowest reading since
+    temp: float  # the Nest's reading at the start
+    low: float  # its lowest since
     seen: datetime
     idle: datetime | None = None  # idling since
+    fine: float | None = None  # a finer sensor at the start, where there is one
+    fine_low: float | None = None
 
     def as_dict(self) -> dict:
         return {k: v.isoformat() if isinstance(v, datetime) else v for k, v in asdict(self).items()}
@@ -48,39 +47,47 @@ class Problem:
     reason: str  # one plain sentence for whoever gets the notification
 
 
-def follow(run: Run | None, heating: bool, temp: float | None, now: datetime) -> Run | None:
+def follow(run: Run | None, heating: bool, temp: float | None, now: datetime, fine: float | None = None) -> Run | None:
     """Carry a heating run on to ``now``."""
     if run is not None and (now - run.seen > BLIND or (run.idle is not None and now - run.idle > GAP)):
         run = None
     if run is None:
-        return Run(now, temp, temp, now) if heating and temp is not None else None
+        return Run(now, temp, temp, now, fine=fine, fine_low=fine) if heating and temp is not None else None
     run.seen = now
     run.idle = None if heating else run.idle or now
     if temp is not None:
         run.low = min(run.low, temp)
+    if fine is not None and run.fine_low is not None:
+        run.fine_low = min(run.fine_low, fine)
     return run
 
 
-def _display(temp: float) -> float:
-    return round(temp * 2) / 2
+def _level(temp: float) -> float:
+    """A Nest reading taken back onto the display flip it reports just past: 25.7 and 25.8 flicker
+    around 25.75, so both are 25.75."""
+    return math.floor(temp * 2) / 2 + 0.25 if abs((temp * 2) % 1 - 0.5) <= 0.2 + 1e-9 else temp
 
 
-def no_heat(run: Run, temp: float, params: Params, outdoor: float, now: datetime) -> str | None:
-    """Why the room counts as heating without warming, or None.
-
-    A Nest reports the room in its 0.5 °C display steps, so the room has only certainly risen less
-    than FLAT once its display is a step below where the run started.
-    """
-    # ponytail: assumes 0.5 °C display steps; a finer thermostat is flagged later than it could be
+def no_heat(run: Run, temp: float, fine: float | None, dead_time: float, now: datetime) -> str | None:
+    """Why the room counts as heating without warming, or None: after the dead time and JUDGE_AFTER
+    more of one call it is lower than when the call began, by a finer sensor where there is one, else
+    by a whole Nest display step. No model in it, so a cold night that slows heating can't hide it."""
     hours = (now - run.start).total_seconds() / 3600
-    expected = params.heated(run.temp, outdoor, hours) - run.temp
-    if hours < params.dead_time + JUDGE_AFTER or expected < EXPECTED:
+    if hours < dead_time + JUDGE_AFTER:
         return None
-    if _display(temp) - _display(run.temp) + 0.5 >= FLAT:
-        return None
+    if run.fine is not None and fine is not None:
+        fell = run.fine - fine
+        if fell < FELL:
+            return None
+    else:
+        fell = _level(run.temp) - _level(temp)
+        if fell < STEP_FELL:
+            return None
     h, m = divmod(round(hours * 60), 60)
     took = f"{h}시간 {m}분째" if m else f"{h}시간째"
-    return (
-        f"{took} 난방 중인데 온도가 오르지 않아요 ({run.temp:.1f}° → {temp:.1f}°, 예상 +{expected:.1f}°). "
-        "구동기나 단지 난방 공급을 확인해 주세요."
-    )
+    return f"{took} 난방 중인데 오히려 {fell:.1f}° 내려갔어요. 구동기나 단지 난방 공급을 확인해 주세요."
+
+
+def warmed(run: Run, temp: float, fine: float | None) -> bool:
+    """The room heats again: WARMED above the run's lowest reading, on either sensor."""
+    return temp - run.low >= WARMED or (fine is not None and run.fine_low is not None and fine - run.fine_low >= WARMED)

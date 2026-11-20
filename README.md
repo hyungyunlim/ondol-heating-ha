@@ -12,7 +12,9 @@ slab can't reach and overshoots after it gets there. This integration:
 - **Schedules** each room by week, with four presets: 편안 (comfort), 수면 (sleep), 절약 (eco: house
   occupied, room unused) and 외출 (away: house certainly empty).
 - **Preheats**: starts a warmer block early by the learned dead time and rise rate, and only when
-  the room would not be warm enough anyway.
+  the room would not be warm enough anyway. Below 10 °C outside it counts on at least 90 % of the
+  slab's gross rise: the night-learned loss, a straight line towards the outdoor temperature, made
+  6–16 h leads in the cold for runs that took 2–4.5 h. Above 10 °C the leads are as before.
 - **Stops early**: before a cooler block it closes the valve as soon as the slab's stored heat will
   carry the room to the end of the block, within a tolerance (per room if needed: a child's room
   can have a tighter one). If the room then cools faster than predicted, it heats again at once
@@ -45,8 +47,10 @@ slab can't reach and overshoots after it gets there. This integration:
   A preheat for that block may raise it, never lower it. Holds from before an away end when the
   away starts. While away with nothing due, the next action says what coming home would bring.
 - **Learns every room** from the thermostat's own history, every night at 04:30 and at start-up.
-- **Raises problems** for notifications: a room heating for hours without warming although the
-  model expected it to, a thermostat offline for 30 minutes, or one refusing commands.
+- **Raises problems** for notifications: a room getting colder through hours of heating, a
+  thermostat offline for 30 minutes, or one refusing commands. The first time a room doesn't warm,
+  it shuts the thermostat's call for 30 seconds and gives its setpoint back (a stuck actuator
+  restarted that way), once.
 
 It starts in an advisory mode that only logs what it would do.
 
@@ -107,7 +111,7 @@ Per room (`<room> 온돌` device):
 | `sensor.<room>_ondol_next_action` | e.g. `20:58 예열 시작 → 22:30 수면 26.0°C` |
 | `sensor.<room>_ondol_heating_today` | hours the valve was open today |
 | `sensor.<room>_ondol_planned_heating` | 100 while the plan would have the valve open (judged on the real room), so advisory plans can be charted next to actual heating |
-| `binary_sensor.<room>_ondol_problem` | on while the room needs a person. Attributes: `kind` (`offline`, `failing` or `no_heat`, one at a time in that order), `reason` (one plain Korean sentence, also the climate entity's `problem` attribute), `since` (when it began), `room` |
+| `binary_sensor.<room>_ondol_problem` | on while the room needs a person. Attributes: `kind` (`offline`, `failing` or `no_heat`, one at a time in that order), `reason` (one plain Korean sentence, also the climate entity's `problem` attribute), `since` (when it began), `retried` (when a no_heat got its automatic retry), `room` |
 | dead time, rise rate, coast, idle drift | learned model, diagnostic |
 
 Decisions go to the logbook, one line each: `제안: Nest 27.0°C → 26.0°C — 일정 수면 26.0°C` in
@@ -119,13 +123,15 @@ noticed and any failed commands.
 Watched whatever the control switch or a hold says:
 
 - `no_heat`: the thermostat has called for heat (idle gaps up to 10 minutes included) for the
-  room's dead time plus 1.5 hours, the model expected the room at least 0.4 °C warmer than at the
-  start by now (at the current outdoor temperature, so a slab at its limit in a cold snap doesn't
-  count), and the room is certainly less than 0.15 °C warmer. A Nest reports the room in its
-  0.5 °C display steps, so that means a step below where the run started. It clears when the room
-  rises 0.3 °C above its lowest reading during a run, or the thermostat is turned off or to eco.
-  With October's models a room that stops warming is flagged after about 5–6 hours of heating
-  (up to 11 in a room that cools as slowly as 안방).
+  room's dead time plus 1.5 hours, and the room is colder than when the call began: 0.2 °C by its
+  finer sensor, or a whole 0.5 °C display step by the Nest (25.7 and 25.8 flickering around 25.75
+  count as the same). No model in it, so a cold night that slows heating can't hide a dead
+  actuator (on 2026-11-19 it would have fired at 03:17 instead of nothing). Not while the room is
+  aired or settling after it. With control on, the first detection shuts the call for 30 seconds
+  (the Nest set 1 °C under the room) and gives back exactly what was set before, a person's hold
+  included, within the rate limits; that isn't taken as a manual change, and the attribute
+  `retried` says when. It clears when the room rises 0.3 °C above its lowest reading (either
+  sensor), and from there the call is judged afresh, or when the thermostat is turned off or to eco.
 - `offline`: the thermostat unavailable for 30 minutes, until it is back.
 - `failing`: three failed commands in a row, until one is confirmed.
 

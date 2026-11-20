@@ -41,4 +41,6 @@ class ProblemSensor(RoomEntity, BinarySensorEntity):
             "kind": problem.kind if problem else None,
             "reason": problem.reason if problem else None,
             "since": dt_util.as_local(problem.since).isoformat() if problem else None,
+            # set when ondol shut the Nest's call for a moment to restart a stuck actuator
+            "retried": dt_util.as_local(self.room.retried).isoformat() if problem and self.room.retried else None,
         }

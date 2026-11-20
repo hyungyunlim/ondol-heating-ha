@@ -6,7 +6,9 @@ drifts towards the outdoor temperature at ``loss`` (1/h). After a long run close
 still lifts the room by ``coast`` °C, peaking ``coast_time`` hours later.
 
 District heating raises its supply temperature as it gets colder outside, so the gross rise is
-fitted as a line over the outdoor temperature (``rise`` at 10 °C plus ``rise_slope`` per °C).
+fitted as a line over the outdoor temperature (``rise`` at 10 °C plus ``rise_slope`` per °C). Below
+10 °C a preheat is also counted on most of its gross rise whatever the night-learned loss says: in the
+cold that loss, a straight line towards the outdoor temperature, made 6-16 h leads for 1.5-4.5 h runs.
 Calibration runs daily: ``extract`` turns a history window into per-run samples, which are kept
 for weeks, and ``fit`` weighs recent samples more so the model follows the season. The heat loss
 comes from nights when there are any: early stops run at night, and a still night shows the
@@ -48,6 +50,10 @@ DROP_WINDOW = timedelta(minutes=15)
 DROP_TRIGGER = 0.4  # °C within DROP_WINDOW: a night cools ~0.03
 CO2_TRIGGER = 0.25  # share of CO₂ gone within DROP_WINDOW, next to a fine sensor's drop
 CO2_ONLY_TRIGGER = 0.4  # on its own: a door opened at night dips ~25 % and comes back, airing ~65 %
+# below REFERENCE_OUTDOOR a preheat nets at least this share of the gross rise: hotter supply water and
+# the evening's own gains made up for nearly all the extra loss in every cold run of Nov 2026 (it took
+# 아기방 4.5 h at 4 °C, 6.0 h now; 안방 1.9 h at 2 °C, 3.1 h; 업무방 at -0.7 °C held as fast as this)
+COLD_NET = 0.9
 
 
 @dataclass(frozen=True)
@@ -81,29 +87,19 @@ class Params:
         """Room temperature after ``hours`` with the valve closed."""
         return outdoor + (temp - outdoor) * math.exp(-self.loss * max(hours, 0.0))
 
-    def heated(self, temp: float, outdoor: float, hours: float) -> float:
-        """Room temperature after ``hours`` with the valve open from ``temp`` (what ``lead`` solves)."""
-        start = self.idle(temp, outdoor, min(hours, self.dead_time))
-        if hours <= self.dead_time:
-            return start
-        rise = self.rise_at(outdoor)
-        if self.loss <= 1e-6:
-            return start + rise * (hours - self.dead_time)
-        ceiling = outdoor + rise / self.loss
-        return ceiling - (ceiling - start) * math.exp(-self.loss * (hours - self.dead_time))
-
     def lead(self, temp: float, goal: float, outdoor: float) -> float:
         """Hours from opening the valve now until the room reaches ``goal`` (inf if it can't)."""
         start = self.idle(temp, outdoor, self.dead_time)
         if goal <= start:
             return self.dead_time
         rise = self.rise_at(outdoor)
+        cold = self.dead_time + (goal - start) / (COLD_NET * rise) if outdoor < REFERENCE_OUTDOOR else math.inf
         if self.loss <= 1e-6:
-            return self.dead_time + (goal - start) / rise
+            return min(self.dead_time + (goal - start) / rise, cold)
         ceiling = outdoor + rise / self.loss  # where heat in = heat out
         if goal >= ceiling - 0.05:
-            return math.inf
-        return self.dead_time + math.log((ceiling - start) / (ceiling - goal)) / self.loss
+            return cold
+        return min(self.dead_time + math.log((ceiling - start) / (ceiling - goal)) / self.loss, cold)
 
     def hold(self, temp: float, floor: float, outdoor: float) -> float:
         """Hours the room stays at or above ``floor`` with the valve closed."""

@@ -36,7 +36,7 @@ from homeassistant.const import (
 from homeassistant.core import Context, Event, EventStateChangedData, HomeAssistant, State, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.event import async_track_state_change_event, async_track_time_change
+from homeassistant.helpers.event import async_call_later, async_track_state_change_event, async_track_time_change
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
@@ -59,6 +59,7 @@ from .const import (
     DEFAULT_TOLERANCE,
     DOMAIN,
     EVENT_ONDOL,
+    MIN_SETPOINT,
     PRESETS,
     SUBENTRY_ROOM,
 )
@@ -71,6 +72,8 @@ PER_HOUR = 12
 CONFIRM_WITHIN = timedelta(minutes=10)  # the Nest reports a new setpoint through Pub/Sub
 MAX_FAILURES = 3
 IN_USE_AFTER = timedelta(minutes=10)  # someone walking past an occupancy sensor isn't using the room
+TOGGLE_FOR = timedelta(seconds=30)  # a stuck actuator gets its call shut this long, then given back
+TOGGLE_RESEND = timedelta(minutes=2)  # the setpoint given back not reported yet: send it again
 REPORT_STEP = 0.5  # °C a Nest's room moves before it reports again, so its reading is never further off
 HISTORY_DAYS = 7
 OFF = (None, STATE_UNAVAILABLE, STATE_UNKNOWN)
@@ -117,6 +120,8 @@ class RoomState:
     offline_since: datetime | None = None
     failing_since: datetime | None = None  # first failure of the current streak
     problem: problems.Problem | None = None  # the one shown
+    retried: datetime | None = None  # when the current no_heat got its one retry
+    toggle: dict | None = None  # that retry in flight: stage (below | restore), below, before, at
 
 
 class OndolCoordinator(DataUpdateCoordinator[None]):
@@ -221,6 +226,9 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         if no_heat := watch.get("no_heat"):
             room.no_heat = problems.Problem("no_heat", datetime.fromisoformat(no_heat["since"]), no_heat["reason"])
         room.offline_since = _when(watch.get("offline_since"))
+        room.retried = _when(watch.get("retried"))
+        if toggle := watch.get("toggle"):  # a restart mid-retry still gives the setpoint back
+            room.toggle = {**toggle, "at": datetime.fromisoformat(toggle["at"])}
 
     def _snapshot(self) -> dict[str, Any]:
         now = dt_util.now()
@@ -259,6 +267,8 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                     if room.no_heat
                     else None,
                     "offline_since": _iso(room.offline_since),
+                    "retried": _iso(room.retried),
+                    "toggle": {**room.toggle, "at": room.toggle["at"].isoformat()} if room.toggle else None,
                 },
             }
         return {"control": self.control, "away_since": _iso(self.away_since), "rooms": rooms}
@@ -388,7 +398,9 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
             return
         before, after = old.attributes.get(ATTR_TEMPERATURE), new.attributes.get(ATTR_TEMPERATURE)
         if after is not None and before != after:
-            if room.pending and abs(after - room.pending[0]) < 0.01:
+            if self._toggling(room, after):
+                pass  # our own retry, not a person: no hold made or cleared
+            elif room.pending and abs(after - room.pending[0]) < 0.01:
                 room.pending, room.failures, room.retry_at = None, 0, None
                 room.last_command = after
             elif self._by_automation(room, now) and not self.control:
@@ -546,6 +558,8 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                 room.status = "error"
             try:  # apart from planning, so neither can stop the other
                 self._watch(room, now)
+                if room.no_heat and room.retried is None and room.toggle is None:
+                    await self._async_start_toggle(room, now)
             except Exception:
                 LOGGER.exception("Watching %s failed", room.name)
         self._save()
@@ -566,15 +580,20 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
             and nest.state == HVACMode.HEAT
             and nest.attributes.get(ATTR_HVAC_ACTION) == HVACAction.HEATING
         )
-        run = room.run = problems.follow(room.run, heating, temp, now)
+        fine = self._reading_of(room.fine)
+        run = room.run = problems.follow(room.run, heating, temp, now, fine)
+        aired = room.aired_until is not None and now - room.aired_until < model.AIRING_SETTLE
         if nest is not None and (nest.state != HVACMode.HEAT or nest.attributes.get(ATTR_PRESET_MODE) == PRESET_ECO):
-            room.no_heat = None  # turned off or to eco: whoever did it knows
+            room.no_heat = room.retried = None  # turned off or to eco: whoever did it knows
         elif run is not None and heating and temp is not None:
             if room.no_heat is not None:
-                if temp - run.low >= problems.WARMED:
-                    room.no_heat = None
-            elif reason := problems.no_heat(run, temp, room.params, self.outdoor(), now):
-                room.no_heat = problems.Problem("no_heat", run.start, reason)
+                if problems.warmed(run, temp, fine):
+                    if room.retried:
+                        self._log(room, ("retry_helped", room.retried), "구동기를 껐다 켠 뒤 다시 데워짐")
+                    room.no_heat = room.retried = None
+                    room.run = problems.follow(None, heating, temp, now, fine)  # judged afresh from here
+            elif not aired and (reason := problems.no_heat(run, temp, fine, room.params.dead_time, now)):
+                room.no_heat = problems.Problem("no_heat", run.start, reason)  # an open window's cold isn't it
         if room.offline_since is not None and now - room.offline_since >= problems.OFFLINE_AFTER:
             room.problem = problems.Problem(
                 "offline", room.offline_since, "Nest 연결이 30분 넘게 끊겨서 일정대로 맞추지 못하고 있어요."
@@ -595,7 +614,12 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
             room.checked = True
             self._track_heating(room, nest, now)
             room.fine_at_report = self._reading_of(room.fine)  # take the Nest's reading as current
-            if room.last_command is not None and target is not None and abs(target - room.last_command) >= 0.01:
+            if (
+                room.last_command is not None
+                and target is not None
+                and abs(target - room.last_command) >= 0.01
+                and not self._toggling(room, target)
+            ):
                 self._manual(room, float(target), now, "재시작 중 수동 변경")
 
         away = self._is_on(self.presence)
@@ -634,6 +658,10 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
             return
         if nest.state != HVACMode.HEAT or nest.attributes.get(ATTR_PRESET_MODE) == PRESET_ECO:  # type: ignore[union-attr]
             room.status = "paused"  # a person turned it off or to eco; leave it alone
+            room.toggle = None
+            return
+        if room.toggle:
+            await self._async_toggle_step(room, target, now)
             return
         if plan.reason == "hold" and not (
             room.last_command is not None and target is not None and abs(target - room.last_command) < 0.01
@@ -669,6 +697,77 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         self._log(room, ("early_over", until), message)
         self.config_entry.async_create_background_task(self.hass, self.async_calibrate(), f"{DOMAIN}_calibrate")
 
+    def _can_send(self, room: RoomState, now: datetime, count: int = 1) -> bool:
+        """Room for ``count`` more commands within the Nest rate limits we keep to."""
+        while room.sent and now - room.sent[0] >= timedelta(hours=1):
+            room.sent.popleft()
+        recent = sum(now - t < timedelta(minutes=1) for t in room.sent)
+        return len(room.sent) + count <= PER_HOUR and recent + count <= PER_MINUTE
+
+    def _toggling(self, room: RoomState, setpoint: Any) -> bool:
+        """Whether a setpoint the Nest reports is our own retry's."""
+        toggle = room.toggle
+        return (
+            toggle is not None
+            and _number(setpoint)
+            and any(abs(float(setpoint) - toggle[k]) < 0.01 for k in ("below", "before"))
+        )
+
+    async def _async_start_toggle(self, room: RoomState, now: datetime) -> None:
+        """Once per no_heat: shut the Nest's call for TOGGLE_FOR and give its setpoint back as it was,
+        a person's hold included. A stuck actuator restarted this way on 2026-11-19."""
+        nest = self.hass.states.get(room.nest)
+        temp = nest.attributes.get(ATTR_CURRENT_TEMPERATURE) if nest is not None else None
+        before = nest.attributes.get(ATTR_TEMPERATURE) if nest is not None else None
+        if not self.control:
+            self._log(room, ("retry_off", room.no_heat.since), "제어가 꺼져 있어 구동기를 껐다 켜 보지는 않음")  # type: ignore[union-attr]
+            return
+        if not (_number(temp) and _number(before)) or not self._can_send(room, now, 2):
+            return  # tried again on the next round
+        below = max(planner.setpoint_for(float(temp) - 1.0), MIN_SETPOINT)  # under the room: the call stops
+        room.toggle = {"stage": "below", "below": below, "before": float(before), "at": now}
+        if not await self._async_command(room, below, now):
+            room.toggle = None
+            return
+        room.retried = now
+        self._log(room, ("retry", now), f"온도가 오르지 않아 구동기를 껐다 켜 봄: Nest {below:.1f}°C로 30초, 다시 {float(before):.1f}°C")
+        self.config_entry.async_on_unload(
+            async_call_later(self.hass, TOGGLE_FOR.total_seconds() + 1, self._refresh_soon)
+        )
+
+    async def _async_toggle_step(self, room: RoomState, target: Any, now: datetime) -> None:
+        """Carry the retry on: give the setpoint back once TOGGLE_FOR is up, until the Nest has it."""
+        toggle: dict = room.toggle  # type: ignore[assignment]
+        if toggle["stage"] == "below":
+            if now - toggle["at"] >= TOGGLE_FOR and await self._async_command(room, toggle["before"], now):
+                toggle.update(stage="restore", at=now)
+        elif _number(target) and abs(float(target) - toggle["before"]) < 0.01:
+            room.toggle = None
+        elif now - toggle["at"] >= TOGGLE_RESEND and await self._async_command(room, toggle["before"], now):
+            toggle["at"] = now
+
+    async def _async_command(self, room: RoomState, setpoint: float, now: datetime) -> bool:
+        """A retry's setpoint: sent like ours, but not taken as the plan's (no pending, no last command)."""
+        if not self._can_send(room, now):
+            return False
+        room.sent.append(now)
+        try:
+            await self.hass.services.async_call(
+                CLIMATE_DOMAIN,
+                SERVICE_SET_TEMPERATURE,
+                {ATTR_ENTITY_ID: room.nest, ATTR_TEMPERATURE: setpoint},
+                blocking=True,
+                context=self._context,
+            )
+        except HomeAssistantError as err:
+            LOGGER.warning("%s: retry command failed: %s", room.name, err)
+            return False
+        return True
+
+    @callback
+    def _refresh_soon(self, _now: datetime) -> None:
+        self.config_entry.async_create_task(self.hass, self.async_request_refresh())
+
     async def _async_send(self, room: RoomState, setpoint: float, now: datetime, why: str) -> bool:
         if room.pending:
             if now - room.pending[1] < CONFIRM_WITHIN:
@@ -677,9 +776,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
             self._failed(room, now, "Nest가 설정을 반영하지 않음")
         if room.retry_at and now < room.retry_at:
             return False
-        while room.sent and now - room.sent[0] >= timedelta(hours=1):
-            room.sent.popleft()
-        if len(room.sent) >= PER_HOUR or sum(now - t < timedelta(minutes=1) for t in room.sent) >= PER_MINUTE:
+        if not self._can_send(room, now):
             LOGGER.debug("%s: holding a command back for the Nest rate limit", room.name)
             return False
         room.sent.append(now)

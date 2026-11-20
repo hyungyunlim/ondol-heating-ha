@@ -11,10 +11,10 @@ FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "nest_room_week.json"
 
 def test_lead_hold_and_ceiling():
     p = Params(dead_time=1.5, rise=0.2, loss=0.004)
-    lead = p.lead(25.0, 26.0, 8.0)  # about 1 °C at a net 0.13 °C/h, after the dead time
-    assert 1.5 + 7 < lead < 1.5 + 9
-    assert p.lead(25.0, 24.0, 8.0) == 1.5  # warm enough already
-    assert math.isinf(p.lead(25.0, 60.0, 8.0))  # above what the slab can hold
+    lead = p.lead(25.0, 26.0, 12.0)  # about 1 °C at a net 0.15 °C/h, after the dead time
+    assert 1.5 + 6 < lead < 1.5 + 8
+    assert p.lead(25.0, 24.0, 12.0) == 1.5  # warm enough already
+    assert math.isinf(p.lead(25.0, 65.0, 12.0))  # above what the slab can hold
     hours = p.hold(26.0, 25.5, 8.0)
     assert abs(p.idle(26.0, 8.0, hours) - 25.5) < 1e-6
     assert p.hold(25.0, 25.5, 8.0) == 0.0
@@ -141,6 +141,19 @@ def test_fast_drops_spot_an_opened_window_but_not_a_night():
     assert fast_drops(_minutes(start, night), _minutes(start, [1150.0] * 300)) == []
     assert fast_drops(_minutes(start, aired), _minutes(start, [1150.0] * 40)) == []  # air cooled, CO₂ kept: aircon
     assert len(fast_drops(None, _minutes(start, co2))) == 1  # a room with only a CO₂ sensor
+
+
+def test_cold_preheats_count_on_most_of_the_gross_rise():
+    """2026-11-20 12:19 at 2.5 °C: 아기방's lead for 24.6 → 25.7 came out 16.5 h, during the daycare eco
+    day; at 2-4 °C its runs took 4.5 h, 안방's 1.9 h. The night-learned loss, a line towards the
+    outdoor temperature, is far too big for a heated room in the cold."""
+    agibang = Params(dead_time=1.3716, rise=0.269, loss=0.008)
+    assert 6.8 < agibang.lead(24.6, 25.7, 2.5) < 7.0  # from 15:35, not 12:19
+    assert agibang.lead(24.8, 25.7, 4.2) < 6.1  # 2026-11-19 16:05 took 4.5 h; it said 12.4
+    assert agibang.lead(24.6, 25.7, -10.0) < 8  # and no hopeless 30 h lead in a hard frost
+    assert 4.5 < agibang.lead(25.2, 25.7, 15.3) < 4.7  # mild weather keeps its lead (4.5 h on 11-13)
+    anbang = Params(dead_time=1.237, rise=0.1685, loss=0.0009)
+    assert 3.0 < anbang.lead(24.75, 25.0, 2.1) < 3.2  # a room that barely loses heat isn't hurried
 
 
 def test_drop_began_dates_the_fall_not_the_window_before_it():

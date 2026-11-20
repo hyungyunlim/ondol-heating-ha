@@ -58,7 +58,7 @@ async def entry(hass: HomeAssistant, freezer: FrozenDateTimeFactory) -> MockConf
     await hass.config.async_set_time_zone("Asia/Seoul")
     freezer.move_to("2026-10-26 12:00:00+09:00")  # a Monday
     set_nest(hass)
-    hass.states.async_set("sensor.outdoor", "8.0")
+    hass.states.async_set("sensor.outdoor", "10.0")
     hass.states.async_set("binary_sensor.away", "off")
     hass.states.async_set("binary_sensor.daycare", "off")
     entry = MockConfigEntry(
@@ -297,7 +297,7 @@ async def test_occupancy_sensor_tracks_real_use(hass: HomeAssistant, freezer: Fr
     freezer.move_to("2026-10-26 07:00:00+09:00")  # Monday, inside last night's eco block
     office = "climate.eobmubang"
     hass.states.async_set(office, "heat", {"temperature": 22.0, "current_temperature": 25.0, "hvac_action": "idle"})
-    hass.states.async_set("sensor.outdoor", "8.0")
+    hass.states.async_set("sensor.outdoor", "10.0")
     hass.states.async_set("binary_sensor.office", "off")
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -383,7 +383,7 @@ async def _airing_entry(hass: HomeAssistant, freezer: FrozenDateTimeFactory) -> 
     await hass.config.async_set_time_zone("Asia/Seoul")
     freezer.move_to("2026-10-26 12:00:00+09:00")
     set_nest(hass)
-    hass.states.async_set("sensor.outdoor", "8.0")
+    hass.states.async_set("sensor.outdoor", "10.0")
     hass.states.async_set("cover.window", "closed")
     hass.states.async_set("sensor.fine", "28.6")
     hass.states.async_set("sensor.co2", "1400")
@@ -531,28 +531,87 @@ def problem_state(hass: HomeAssistant, entry: MockConfigEntry):
 
 
 async def test_a_room_heating_without_warming_is_a_problem_until_it_warms(hass, entry, freezer):
+    events = async_capture_events(hass, EVENT_ONDOL)
     set_nest(hass, temperature=26.0, current=25.3, action="heating")  # the Nest calls for heat from 12:00
     await hass.async_block_till_done()
-    for minutes in range(15, 6 * 60 + 1, 15):
+    for minutes in range(15, 4 * 60 + 1, 15):
         if minutes == 60:
-            set_nest(hass, temperature=26.0, current=25.2, action="heating")  # cooler by a display step
+            set_nest(hass, temperature=26.0, current=24.8, action="heating")  # cooler by a display step
         await refresh_at(hass, freezer, entry, f"2026-10-26 {12 + minutes // 60:02d}:{minutes % 60:02d}:00+09:00")
-        if minutes == 5 * 60 + 30:
-            assert problem_state(hass, entry).state == "off"  # the model doesn't expect +0.4 °C yet
+        if minutes == 3 * 60:
+            assert problem_state(hass, entry).state == "off"  # judged after the dead time and 1.5 h
     problem = problem_state(hass, entry)
-    reason = "5시간 45분째 난방 중인데 온도가 오르지 않아요 (25.3° → 25.2°, 예상 +0.4°). 구동기나 단지 난방 공급을 확인해 주세요."
+    reason = "3시간 15분째 난방 중인데 오히려 0.5° 내려갔어요. 구동기나 단지 난방 공급을 확인해 주세요."
     assert (problem.state, problem.attributes["kind"], problem.attributes["reason"]) == ("on", "no_heat", reason)
     assert problem.attributes["since"] == "2026-10-26T12:00:00+09:00"
+    assert problem.attributes["retried"] is None  # control is off: hands off the Nest
+    assert any(e.data["message"] == "제어가 꺼져 있어 구동기를 껐다 켜 보지는 않음" for e in events)
     assert hass.states.get(entity(hass, entry, "climate", "room")).attributes["problem"] == reason
 
     assert await hass.config_entries.async_unload(entry.entry_id)  # a restart keeps it
     await _setup(hass, entry)
     assert problem_state(hass, entry).attributes["reason"] == reason
 
-    set_nest(hass, temperature=26.0, current=25.8, action="heating")  # warming again
-    await refresh_at(hass, freezer, entry, "2026-10-26 18:20:00+09:00")
+    set_nest(hass, temperature=26.0, current=25.3, action="heating")  # warming again
+    await refresh_at(hass, freezer, entry, "2026-10-26 16:20:00+09:00")
     assert problem_state(hass, entry).state == "off"
     assert hass.states.get(entity(hass, entry, "climate", "room")).attributes["problem"] is None
+
+
+async def _stuck_from_noon(hass, entry, freezer) -> None:
+    """Someone set 26.5 at noon (a hold until 22:30); the Nest calls for heat and the room only falls."""
+    set_nest(hass, temperature=26.5, current=25.3, action="heating")
+    await hass.async_block_till_done()
+    for minutes in range(15, 3 * 60 + 16, 15):
+        if minutes == 60:
+            set_nest(hass, temperature=26.5, current=24.8, action="heating")
+        await refresh_at(hass, freezer, entry, f"2026-10-26 {12 + minutes // 60:02d}:{minutes % 60:02d}:00+09:00")
+
+
+async def test_a_room_that_doesnt_warm_gets_one_retry_that_keeps_the_hold(hass, entry, calls, freezer):
+    """2026-11-19: lowering the Nest for 20 s restarted 아기방's stuck actuator; ondol does it once by itself."""
+    events = async_capture_events(hass, EVENT_ONDOL)
+    await control_on(hass, entry)
+    await _stuck_from_noon(hass, entry, freezer)  # flagged at 15:15
+    room = next(iter(coordinator(entry).rooms.values()))
+    hold = room.memory.hold
+    assert hold is not None and hold.target == 26.5
+    assert [c.data["temperature"] for c in calls] == [24.0]  # under the room's 24.8: the call stops
+    assert problem_state(hass, entry).attributes["retried"] == "2026-10-26T15:15:00+09:00"
+    assert any(e.data["message"] == "온도가 오르지 않아 구동기를 껐다 켜 봄: Nest 24.0°C로 30초, 다시 26.5°C" for e in events)
+
+    set_nest(hass, temperature=24.0, current=24.8)  # the Nest takes it: not a person's change
+    await hass.async_block_till_done()
+    await refresh_at(hass, freezer, entry, "2026-10-26 15:15:20+09:00")
+    assert [c.data["temperature"] for c in calls] == [24.0]  # still shut
+    await refresh_at(hass, freezer, entry, "2026-10-26 15:15:31+09:00")
+    assert [c.data["temperature"] for c in calls] == [24.0, 26.5]  # the person's value back
+    set_nest(hass, temperature=26.5, current=24.8, action="heating")
+    await hass.async_block_till_done()
+    await refresh_at(hass, freezer, entry, "2026-10-26 15:20:00+09:00")
+    assert room.toggle is None and room.memory.hold == hold  # the hold as it was
+    assert not any("수동 변경" in e.data["message"] for e in events[1:])
+
+    await refresh_at(hass, freezer, entry, "2026-10-26 16:00:00+09:00")
+    assert len(calls) == 2  # one retry per problem
+
+    set_nest(hass, temperature=26.5, current=25.3, action="heating")  # the actuator turns again
+    await refresh_at(hass, freezer, entry, "2026-10-26 16:30:00+09:00")
+    assert problem_state(hass, entry).state == "off"
+    assert any(e.data["message"] == "구동기를 껐다 켠 뒤 다시 데워짐" for e in events)
+
+
+async def test_a_restart_during_a_retry_still_gives_the_setpoint_back(hass, entry, calls, freezer):
+    await control_on(hass, entry)
+    await _stuck_from_noon(hass, entry, freezer)
+    set_nest(hass, temperature=24.0, current=24.8)
+    await hass.async_block_till_done()
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    freezer.move_to("2026-10-26 15:17:00+09:00")
+    await _setup(hass, entry)
+    room = next(iter(coordinator(entry).rooms.values()))
+    assert room.memory.hold is not None and room.memory.hold.target == 26.5  # 24.0 isn't taken as a hold
+    assert calls[-1].data["temperature"] == 26.5
 
 
 async def test_an_offline_or_failing_nest_is_a_problem(hass, entry, freezer):
@@ -635,3 +694,22 @@ async def test_a_heat_pulse_holds_off_an_early_stop_until_it_settles(hass, entry
     assert room.plan.reason == "schedule"  # 30 min after a 30-min pulse: the room is at its peak
     await refresh_at(hass, freezer, entry, "2026-10-27 02:30:00+09:00")
     assert room.plan.reason == "early_stop"  # coast_time + 1 h after it
+
+
+async def test_once_warming_again_the_call_is_judged_afresh(hass, freezer):
+    """Recovering, the room is still below where the call began: that isn't a second problem (the
+    2026-11-19 replay flapped on and off every few minutes until this)."""
+    entry = await _airing_entry(hass, freezer)
+    set_nest(hass, temperature=26.0, current=25.3, action="heating")  # someone's 26 at noon, and a call
+    hass.states.async_set("sensor.fine", "28.6")
+    await hass.async_block_till_done()
+    for minutes in range(5, 3 * 60 + 16, 5):
+        hass.states.async_set("sensor.fine", str(round(28.6 - 0.2 * minutes / 60, 1)))  # falling 0.2 °C/h
+        await refresh_at(hass, freezer, entry, f"2026-10-26 {12 + minutes // 60:02d}:{minutes % 60:02d}:00+09:00")
+    assert problem_state(hass, entry).state == "on"  # 15:15, Awair 28.6 -> 28.0
+    hass.states.async_set("sensor.fine", "28.3")  # up 0.3 from its low
+    await refresh_at(hass, freezer, entry, "2026-10-26 15:30:00+09:00")
+    assert problem_state(hass, entry).state == "off"
+    for when in ("15:35", "15:50", "16:30"):  # still 0.3 under the call's start
+        await refresh_at(hass, freezer, entry, f"2026-10-26 {when}:00+09:00")
+        assert problem_state(hass, entry).state == "off"
