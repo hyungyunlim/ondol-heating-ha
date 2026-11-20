@@ -10,7 +10,10 @@ is judged on a finer sensor's reading where it shows the room cooler than the Ne
 slab, and the room falls fast from its peak). Once stopped, it isn't called off in the block's last
 dead time, since heat from then on lands after the block starts.
 While away nothing preheats, except a room that follows daycare while the child is there: it
-still warms up for today's next comfort block, since pickup brings someone home.
+still warms up for today's next comfort block, since pickup brings someone home. A planned return
+is the other known arrival: every room takes it as a block start whose goal is its own schedule
+preset at that time, however far ahead, and from then on holds that goal until the house is home
+or the coordinator gives up on the return.
 While a long heat-up is running the Nest aims 0.5 °C low, so the coast lands on the target.
 
 A room with an occupancy sensor treats an eco block as comfort while it is in use (and for an
@@ -32,6 +35,7 @@ from .model import Params
 from .schedule import Block, Entries, block_at, upcoming
 
 HORIZON_HOURS = 18  # a warmer block further ahead than this can't need heat yet
+PREHEAT_CAP_HOURS = 24  # no preheat starts earlier, whatever the model says (a return can be days off)
 # ponytail: stop at most this long before a block ends (the slab held 3-6 h in Oct 2026); longer
 # extrapolations lean too hard on the learned loss. Make it per-room if winter data says so.
 EARLY_STOP_HOURS = 6
@@ -64,6 +68,7 @@ class Now:
     aired_recently: bool = False  # airing ended less than an hour ago: the air is still settling
     fresh: float | None = None  # the room now, by a finer sensor's change since the Nest last reported
     run: tuple[datetime, datetime | None] | None = None  # the Nest's heating run, now (no end) or last
+    returning: datetime | None = None  # a planned return, acted on while away
 
 
 @dataclass(frozen=True)
@@ -99,6 +104,7 @@ class Plan:
     next_at: datetime | None = None
     next_text: str | None = None
     airing_since: datetime | None = None
+    return_start: datetime | None = None  # when this room's preheat for the planned return starts
 
     @property
     def text(self) -> str:
@@ -156,15 +162,23 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
     ahead = upcoming(room.entries, t, HORIZON_HOURS)
     for_block: Block | None = None
     lead: float | None = None
+    return_start: datetime | None = None
     found: list[tuple[datetime, str]] = []  # changes coming up, for the next-action text
 
     # while away nothing preheats, except for pickup, a predictable arrival: a child's room still
     # warms up for today's comfort block while the child is at daycare
     pickup = next((b for b in ahead if b.preset == "comfort" and b.start.date() == t.date()), None)
     away_preheat = [pickup] if pickup and room.follows_daycare and now.daycare else []
+    back = None  # the planned return, as a block with the room's own preset then
+    if now.away and now.returning is not None:
+        back = Block(now.returning, block_at(room.entries, now.returning).preset)
+        if t < back.start:
+            away_preheat = [*away_preheat, back]
     if now.away and mem.hold is None:
         mem.early_for = None
         target, preset, reason = room.presets["away"], "away", "away"
+        if back is not None and t >= back.start:  # late home: keep it ready
+            target, preset, reason, for_block = room.presets[back.preset], back.preset, "preheat", back
         preheatable = away_preheat
     else:
         block = block_at(room.entries, t)
@@ -195,7 +209,9 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
             goal = room.presets[block.preset]
             if goal <= target:
                 continue
-            need = params.lead(temp, goal - tolerance, now.outdoor)
+            need = min(params.lead(temp, goal - tolerance, now.outdoor), PREHEAT_CAP_HOURS)
+            if block == back and _short_without_heat(params, now, block, goal, tolerance):
+                return_start = block.start - timedelta(hours=need)
             if mem.preheat_for == block.start and _hours(t, block.start) > 1.5 * need:
                 mem.preheat_for = None  # the room needs far less than when it latched: decide again
             if mem.preheat_for != block.start:
@@ -283,6 +299,7 @@ def plan(room: Room, params: Params, now: Now, mem: Memory, tolerance: float) ->
         next_at=next_at,
         next_text=next_text,
         airing_since=now.airing_since,
+        return_start=return_start,
     )
 
 
@@ -316,8 +333,8 @@ def _next(
                 and not (now.airing_since or now.aired_recently)
                 and _short_without_heat(params, now, block, goal, tolerance)
             ):
-                start = block.start - timedelta(hours=min(params.lead(temp, goal - tolerance, now.outdoor), 48))
-                if t < start < block.start:
+                start = block.start - timedelta(hours=min(params.lead(temp, goal - tolerance, now.outdoor), PREHEAT_CAP_HOURS))
+                if t < start < block.start and start - t < timedelta(days=1):  # HH:MM can't say which day
                     label = PRESET_LABELS[block.preset]
                     found.append((start, f"{start:%H:%M} 예열 시작 → {block.start:%H:%M} {label} {goal:.1f}°C"))
         if (

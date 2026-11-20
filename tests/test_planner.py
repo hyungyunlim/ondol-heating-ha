@@ -308,3 +308,37 @@ def test_an_early_stop_isnt_called_off_in_its_last_dead_time():
     earlier = Memory()
     plan(AGIBANG, NOV, nov("04:50", 11, temp=26.1), earlier, 0.3)
     assert plan(AGIBANG, NOV, nov("06:00", 11, temp=25.6), earlier, 0.3).reason == "schedule"  # still in time
+
+
+def test_a_planned_return_preheats_while_away():
+    """Back at 23:00 after a trip: the room counts it as a block with its own preset then (sleep 26 from
+    22:30), however far ahead, and starts with its usual lead so it is at 26 - tolerance by 23:00."""
+    back = at("23:00")
+    cold = Params(dead_time=1.5, rise=0.2, loss=0.004)
+    away = dict(outdoor=8.0, away=True, returning=back)
+    lead = cold.lead(23.0, 25.5, 8.0)
+    assert 15 < lead < 17  # below 10 °C outside: the cold-weather lead
+    start = back - timedelta(hours=lead)
+    waiting = plan(ROOM, cold, Now(at=start - timedelta(minutes=10), temp=23.0, **away), Memory(), TOL)
+    assert (waiting.reason, waiting.target) == ("away", 20.0)
+    assert waiting.next_text == f"{start:%H:%M} 예열 시작 → 23:00 수면 26.0°C"
+    assert waiting.return_start == start
+    going = plan(ROOM, cold, Now(at=start + timedelta(minutes=10), temp=23.0, **away), Memory(), TOL)
+    assert (going.reason, going.target, going.text) == ("preheat", 26.0, f"예열: 23:00 수면 26.0°C, {lead:.1f}시간 가동")
+    # a room at 21 °C in a frost needs more than a day by the model: it starts 24 h ahead, not sooner
+    frost = Now(at=back - timedelta(hours=23), temp=21.0, outdoor=0.0, away=True, returning=back)
+    assert plan(ROOM, cold, frost, Memory(), TOL).reason == "preheat"
+    early = Now(at=back - timedelta(hours=25), temp=21.0, outdoor=0.0, away=True, returning=back)
+    assert plan(ROOM, cold, early, Memory(), TOL).reason == "away"
+
+
+def test_a_planned_return_only_counts_while_away():
+    back = at("23:00")
+    home = plan(ROOM, PARAMS, Now(at=at("12:00"), temp=25.9, outdoor=8.0, returning=back), Memory(), TOL)
+    assert (home.reason, home.return_start) == ("schedule", None)
+    # late, still away: keep the room ready (the coordinator gives up three hours on)
+    late = plan(ROOM, PARAMS, Now(at=at("23:40"), temp=26.0, outdoor=8.0, away=True, returning=back), Memory(), TOL)
+    assert (late.reason, late.target, late.text) == ("preheat", 26.0, "예열: 23:00 수면 26.0°C")
+    # days off, the start isn't within a day: the next action says what coming home now brings
+    far = plan(ROOM, PARAMS, Now(at=at("12:00"), temp=24.0, outdoor=8.0, away=True, returning=back + timedelta(days=3)), Memory(), TOL)
+    assert far.reason == "away" and far.next_text == "귀가하면 편안 25.0°C"

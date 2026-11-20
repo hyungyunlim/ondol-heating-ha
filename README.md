@@ -29,6 +29,11 @@ slab can't reach and overshoots after it gets there. This integration:
   instead of comfort while a daycare sensor is on. While away nothing preheats, except a child's
   room while the child is at daycare: pickup brings someone home, so it still warms up for that
   day's next comfort block.
+- **Warms up for a planned return** (귀가 예정): a date and time anyone can set from a dashboard.
+  While away, every room takes it as a block start whose goal is its own schedule's preset then
+  (아기방 at 23:00: 수면 26) and preheats for it with its usual lead, however far ahead, but never
+  more than 24 hours early. Late, the rooms stay ready; it is cleared once the house is home, three
+  hours after the time while still away, when a time already past is entered, or by its button.
 - **Follows a room's occupancy** (optional sensor per room): someone in the room for 10 minutes
   turns an eco block into comfort, kept for an hour after they leave; a comfort block nobody has
   used for two hours drops to eco until someone comes back. For rooms used off schedule, such as a
@@ -101,7 +106,9 @@ Days are 월…일 or mon…sun, ranges (`월-금`), lists (`토,일`) or `매�
 
 ## Entities
 
-Hub: `switch.…_control` (난방 제어: off = advisory), `sensor.…_cost_today`, `sensor.…_cost_this_month`.
+Hub: `switch.…_control` (난방 제어: off = advisory), `sensor.…_cost_today`, `sensor.…_cost_this_month`,
+`datetime.…_planned_return` (귀가 예정; attributes `preheat_starts` per room and `first_preheat`, known
+while away) and `button.…_clear_planned_return` (귀가 예정 지우기).
 
 Per room (`<room> 온돌` device):
 

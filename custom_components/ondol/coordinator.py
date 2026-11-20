@@ -72,6 +72,7 @@ PER_HOUR = 12
 CONFIRM_WITHIN = timedelta(minutes=10)  # the Nest reports a new setpoint through Pub/Sub
 MAX_FAILURES = 3
 IN_USE_AFTER = timedelta(minutes=10)  # someone walking past an occupancy sensor isn't using the room
+RETURN_GRACE = timedelta(hours=3)  # still away this long after a planned return: it isn't happening
 TOGGLE_FOR = timedelta(seconds=30)  # a stuck actuator gets its call shut this long, then given back
 TOGGLE_RESEND = timedelta(minutes=2)  # the setpoint given back not reported yet: send it again
 REPORT_STEP = 0.5  # °C a Nest's room moves before it reports again, so its reading is never further off
@@ -121,6 +122,7 @@ class RoomState:
     failing_since: datetime | None = None  # first failure of the current streak
     problem: problems.Problem | None = None  # the one shown
     retried: datetime | None = None  # when the current no_heat got its one retry
+    return_logged: datetime | None = None  # the planned return whose preheat start was logged
     toggle: dict | None = None  # that retry in flight: stage (below | restore), below, before, at
 
 
@@ -137,6 +139,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         self.won_per_hour: float = options.get(CONF_WON_PER_HOUR) or 0.0
         self.control = False
         self.away_since: datetime | None = None
+        self.return_at: datetime | None = None  # a planned return: rooms preheat for it while away
         self.rooms: dict[str, RoomState] = {}
         self._outdoor = model.REFERENCE_OUTDOOR
         self._store: Store[dict[str, Any]] = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}")
@@ -148,6 +151,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         stored = await self._store.async_load() or {}
         self.control = stored.get("control", False)
         self.away_since = _when(stored.get("away_since"))  # survives a restart mid-away
+        self.return_at = _when(stored.get("return_at"))
         saved = stored.get("rooms", {})
         for subentry in self.config_entry.subentries.values():
             if subentry.subentry_type != SUBENTRY_ROOM:
@@ -271,7 +275,12 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                     "toggle": {**room.toggle, "at": room.toggle["at"].isoformat()} if room.toggle else None,
                 },
             }
-        return {"control": self.control, "away_since": _iso(self.away_since), "rooms": rooms}
+        return {
+            "control": self.control,
+            "away_since": _iso(self.away_since),
+            "return_at": _iso(self.return_at),
+            "rooms": rooms,
+        }
 
     def _save(self) -> None:
         self._store.async_delay_save(self._snapshot, 30)
@@ -550,6 +559,7 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
 
     async def _async_update_data(self) -> None:
         now = dt_util.now()
+        self._check_return(now)
         for room in self.rooms.values():
             try:
                 await self._async_run(room, now)
@@ -646,11 +656,16 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
                 aired_recently=airing[1],
                 fresh=self._fresh(room, temp),
                 run=(room.run_since, None) if heating and room.run_since else room.last_run,
+                returning=self.return_at,
             ),
             room.memory,
             room.tolerance if room.tolerance is not None else self.tolerance,
         )
         plan = room.plan
+        back = self.return_at
+        if plan.reason == "preheat" and back and plan.block and plan.block.start == back and room.return_logged != back:
+            room.return_logged = back
+            self._log(room, ("return_preheat", back), f"귀가 예정 {back:%H:%M}에 맞춰 예열 시작: {plan.text}")
         if early[0] and room.memory.early_for != early[0]:
             self._early_stop_over(room, early[0], early[1], temp, now)
         if not available:
@@ -813,6 +828,47 @@ class OndolCoordinator(DataUpdateCoordinator[None]):
         )
 
     # ---- entity actions ------------------------------------------------------------------------
+
+    async def async_set_return(self, when: datetime | None, why: str = "지움") -> None:
+        """A planned return set or cleared from its entities; one already past is not kept."""
+        now = dt_util.now()
+        if when is not None and when <= now:
+            self._clear_return(f"{dt_util.as_local(when):%m월 %d일 %H:%M}은 지난 시각")
+        elif when is not None:
+            self.return_at = dt_util.as_local(when)
+            self._log_hub(f"귀가 예정 {self.return_at:%m월 %d일 %H:%M}: 외출 중이면 그때 맞춰 방마다 데움")
+        else:
+            self._clear_return(why)
+        self._save()
+        await self.async_refresh()
+
+    def _check_return(self, now: datetime) -> None:
+        """Drop a planned return once it is over: home again, passed while home, or long overdue."""
+        back = self.return_at
+        if back is None:
+            return
+        away = self._is_on(self.presence)
+        if not away and self.away_since is not None:
+            self._clear_return("귀가함")
+        elif not away and now >= back:
+            self._clear_return("집에 있는 동안 시각이 지남")
+        elif away and now >= back + RETURN_GRACE:
+            self._clear_return(f"{back:%H:%M}에서 3시간이 지나도 외출 중이라 외출 온도로 돌아감")
+
+    def _clear_return(self, why: str) -> None:
+        if self.return_at is not None or "지난 시각" in why:
+            self._log_hub(f"귀가 예정 지움: {why}")
+        self.return_at = None
+        self._save()
+
+    def _log_hub(self, message: str) -> None:
+        LOGGER.info("%s", message)
+        entity_id = er.async_get(self.hass).async_get_entity_id(
+            "datetime", DOMAIN, f"{self.config_entry.entry_id}_return"
+        )
+        self.hass.bus.async_fire(
+            EVENT_ONDOL, {"name": "온돌 난방", "message": message, "entity_id": entity_id}, context=self._context
+        )
 
     async def async_set_control(self, on: bool) -> None:
         self.control = on

@@ -1,3 +1,4 @@
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
@@ -90,7 +91,7 @@ def coordinator(entry: MockConfigEntry) -> OndolCoordinator:
 
 
 def entity(hass: HomeAssistant, entry: MockConfigEntry, platform: str, key: str) -> str:
-    owner = entry.entry_id if key in ("control", "cost_today", "cost_month") else next(iter(entry.subentries))
+    owner = entry.entry_id if key in ("control", "cost_today", "cost_month", "return", "clear_return") else next(iter(entry.subentries))
     entity_id = er.async_get(hass).async_get_entity_id(platform, DOMAIN, f"{owner}_{key}")
     assert entity_id
     return entity_id
@@ -713,3 +714,73 @@ async def test_once_warming_again_the_call_is_judged_afresh(hass, freezer):
     for when in ("15:35", "15:50", "16:30"):  # still 0.3 under the call's start
         await refresh_at(hass, freezer, entry, f"2026-10-26 {when}:00+09:00")
         assert problem_state(hass, entry).state == "off"
+
+
+async def set_return(hass: HomeAssistant, entry: MockConfigEntry, when: str) -> None:
+    await hass.services.async_call(
+        "datetime", "set_value", {"entity_id": entity(hass, entry, "datetime", "return"), "datetime": when}, blocking=True
+    )
+
+
+async def test_a_planned_return_is_kept_until_cleared(hass, entry, freezer):
+    events = async_capture_events(hass, EVENT_ONDOL)
+    await set_return(hass, entry, "2026-10-26 09:00:00+09:00")  # already past at noon
+    assert coordinator(entry).return_at is None
+    assert events[-1].data["message"] == "귀가 예정 지움: 10월 26일 09:00은 지난 시각"
+    await set_return(hass, entry, "2026-10-27 23:00:00+09:00")
+    eid = entity(hass, entry, "datetime", "return")
+    assert hass.states.get(eid).state == "2026-10-27T14:00:00+00:00"
+    assert events[-1].data == {
+        "name": "온돌 난방",
+        "message": "귀가 예정 10월 27일 23:00: 외출 중이면 그때 맞춰 방마다 데움",
+        "entity_id": eid,
+    }
+    assert await hass.config_entries.async_unload(entry.entry_id)  # kept across a restart
+    await _setup(hass, entry)
+    assert hass.states.get(eid).state == "2026-10-27T14:00:00+00:00"
+    await hass.services.async_call("button", "press", {"entity_id": entity(hass, entry, "button", "clear_return")}, blocking=True)
+    assert hass.states.get(eid).state == "unknown"
+    assert events[-1].data["message"] == "귀가 예정 지움: 지우기 버튼"
+
+
+async def test_rooms_preheat_for_a_planned_return_until_the_family_is_back(hass, entry, freezer):
+    events = async_capture_events(hass, EVENT_ONDOL)
+    hass.states.async_set("binary_sensor.away", "on")
+    await refresh_at(hass, freezer, entry, "2026-10-26 12:00:00+09:00")  # the room at 25.0
+    room = next(iter(coordinator(entry).rooms.values()))
+    assert room.plan.reason == "away"
+    await set_return(hass, entry, "2026-10-26 23:00:00+09:00")
+    eid = entity(hass, entry, "datetime", "return")
+    first = hass.states.get(eid).attributes["first_preheat"]
+    start = dt_util.parse_datetime(first)
+    assert dt_util.parse_datetime("2026-10-26 16:00:00+09:00") < start < dt_util.parse_datetime("2026-10-26 18:00:00+09:00")
+    assert hass.states.get(eid).attributes["preheat_starts"] == {"아기방": first}
+    assert room.plan.next_text == f"{start:%H:%M} 예열 시작 → 23:00 수면 26.0°C"
+    await refresh_at(hass, freezer, entry, (start + timedelta(minutes=5)).isoformat())
+    assert (room.plan.reason, room.plan.target) == ("preheat", 26.0)
+    assert any(e.data["message"].startswith("귀가 예정 23:00에 맞춰 예열 시작: 예열: 23:00 수면 26.0°C") for e in events)
+
+    hass.states.async_set("binary_sensor.away", "off")  # home
+    await hass.async_block_till_done()
+    await refresh_at(hass, freezer, entry, (start + timedelta(minutes=10)).isoformat())
+    assert coordinator(entry).return_at is None and room.plan.reason != "away"
+    assert any(e.data["message"] == "귀가 예정 지움: 귀가함" for e in events)
+
+
+async def test_an_overdue_or_passed_return_is_dropped(hass, entry, freezer):
+    events = async_capture_events(hass, EVENT_ONDOL)
+    hass.states.async_set("binary_sensor.away", "on")
+    await set_return(hass, entry, "2026-10-26 13:00:00+09:00")
+    await refresh_at(hass, freezer, entry, "2026-10-26 15:59:00+09:00")
+    room = next(iter(coordinator(entry).rooms.values()))
+    assert room.plan.reason == "preheat"  # late: kept ready
+    await refresh_at(hass, freezer, entry, "2026-10-26 16:00:00+09:00")
+    assert coordinator(entry).return_at is None and room.plan.reason == "away"
+    assert any(e.data["message"] == "귀가 예정 지움: 13:00에서 3시간이 지나도 외출 중이라 외출 온도로 돌아감" for e in events)
+
+    hass.states.async_set("binary_sensor.away", "off")
+    await refresh_at(hass, freezer, entry, "2026-10-26 17:00:00+09:00")
+    await set_return(hass, entry, "2026-10-26 18:00:00+09:00")  # a trip that didn't happen
+    await refresh_at(hass, freezer, entry, "2026-10-26 18:01:00+09:00")
+    assert coordinator(entry).return_at is None
+    assert any(e.data["message"] == "귀가 예정 지움: 집에 있는 동안 시각이 지남" for e in events)

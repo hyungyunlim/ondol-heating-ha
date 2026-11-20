@@ -176,6 +176,16 @@
       "control": {
         "name": "Control"
       }
+    },
+    "datetime": {
+      "return": {
+        "name": "Planned return"
+      }
+    },
+    "button": {
+      "clear_return": {
+        "name": "Clear planned return"
+      }
     }
   }
 }

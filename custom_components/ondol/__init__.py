@@ -8,7 +8,7 @@ from homeassistant.core import HomeAssistant
 
 from .coordinator import OndolCoordinator
 
-PLATFORMS = [Platform.BINARY_SENSOR, Platform.CLIMATE, Platform.SENSOR, Platform.SWITCH]
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.CLIMATE, Platform.DATETIME, Platform.SENSOR, Platform.SWITCH]
 
 type OndolConfigEntry = ConfigEntry[OndolCoordinator]
 

@@ -176,6 +176,16 @@
       "control": {
         "name": "난방 제어"
       }
+    },
+    "datetime": {
+      "return": {
+        "name": "귀가 예정"
+      }
+    },
+    "button": {
+      "clear_return": {
+        "name": "귀가 예정 지우기"
+      }
     }
   }
 }
